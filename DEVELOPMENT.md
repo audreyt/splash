@@ -111,7 +111,8 @@ HF_HUB_CACHE=/Volumes/Models/huggingface splash serve --model incoai/Qwen3.8-27B
 `HF_HUB_CACHE` selects the Hugging Face download cache. Alternatively, set
 `HF_HOME` to relocate the Hugging Face home directory, including its default
 `hub` cache. Model links and agent sessions stay in Splash's data directory;
-existing downloads are not moved.
+existing downloads are not moved. Prepared weights have their own cache,
+which this does not move ([Weight preparation](#weight-preparation)).
 
 ## Model packages
 
@@ -125,17 +126,156 @@ fine-tunes may use any nonempty manifest model name. Native loading validates
 geometry, tensor sizes, binary headers, tokenizer and target/draft compatibility.
 New architectures require engine support; ordinary HF weights need conversion.
 
-## GGUF kernels
+### Vision
 
-Operator plans use each projection's physical layout, `Affine64` or `Block32`.
-`Projection`, `MoeWeights` and `EmbeddingWeights` (`runtime/ops/Weights.hpp`,
-`MoE.hpp`) hold either layout and represent different operator contracts.
+An MLX model's `vision_tower.*` tensors and a GGUF `mmproj` projector both
+prepare the packed `vision/model.bin` layout, which the one BF16 vision
+operator reads: BF16 tensors are copied, and F32 or F16 tensors are
+converted under the exact-BF16 rule of [weight preparation](#weight-preparation).
+Unsloth's mmproj stores its 1-D tensors, patch embedding and position table as
+F32, all of them BF16-exact, and prepares byte-identical to the packed file.
+Quantized MLX towers, deepstack projectors and mmproj tensors the tower does not
+use are rejected.
 
-The F32 norm multipliers, GDN decay, the MoE router and shared-expert scalar
-gate, and GDN alpha/beta when stored as F32 run in fp32, as llama.cpp keeps
-them (Apple10 prefill chunks multiply the router and alpha/beta on the neural
-accelerator as three bf16 parts per weight that sum to it exactly, so only
-fp32 accumulation rounds).
+### Weight preparation
+
+Source adapters write a model's target and vision tensors into prepared files:
+an MLX target and any vision tower into the packed layouts of Splash packages,
+which run the same kernels, and a GGUF target into the `MDGG0001` layout of the
+GGUF kernels. Each adapter is a loader, which validates the source's metadata
+and plans its files, and a writer: `AffineTargetLoader` (`AffineTarget.cpp`)
+and `AffinePreparation` for an MLX target, `GgufTargetLoader`
+(`GgufTarget.cpp`, planned by `GgufImage.cpp`) and `GgufPreparation` for a GGUF
+target, `VisionLoader` and `VisionPreparation` for an MLX or GGUF vision tower.
+They open their files through `PreparedFiles`, the `PreparedWeights` cache with
+the load's guards. `AffinePreparation` reorders codes, scales and biases into
+256-row tiles without requantization and computes GDN decay as
+`float(-exp(double(A_log)))`, which may differ by one float ULP in this small
+vector from packages produced with MLX's float exponential. `GgufPreparation`
+repacks GGUF blocks ([GGUF targets](#gguf-targets)).
+
+Preparation never rounds a weight. A tensor it converts to BF16 (vision tensors
+stored as F32 or F16, a GGUF's convolution taps and time-step bias) must be
+exactly representable in BF16; otherwise preparation fails, naming the tensor
+and, for a vision tensor, its file.
+
+The cache is `~/Library/Caches/Splash/weights`, or the directory
+`SPLASH_WEIGHT_CACHE` names; nothing else selects it. It holds an additional
+copy of the weights about the model's size, its prepared target and vision
+tensors. Preparing needs that much free disk space plus a 2 GiB reserve: before
+anything is written, the factory (`ModelFactory.cpp`) constructs the vision
+tower's loader (`planVisionLoader`, which the vision encoder test shares) and
+the target's, and checks the space of every missing file they plan, plus the
+reserve, once. Uninstalling a model does not delete possibly
+shared prepared weights. With Splash stopped, entry directories can be deleted;
+deleting the whole cache causes preparation at the next load.
+
+A prepared file's key hashes its adapter's preparation identity, its plan, and
+the bytes, type and shape of every source tensor it reads, located and hashed
+within its file's tensor data. An edit to a source's metadata only (a GGUF chat
+template, a safetensors header), `config.json` or files the component does not
+read keeps every key. The preparation identity is a build-generated fingerprint
+of only the code that writes the bytes, the files listed per adapter in
+`INPUTS` of `dev/tools/weight_preparation_identity.py`; inference, parser,
+planner and reader changes keep it. The hashes of the images prepared from the
+test fixtures, in `dev/tests/fixtures/weight-goldens/goldens.json`, fail the
+tests on any change of prepared bytes. The README beside it gives the
+procedure for an intended change: the key the new bytes need, and the order in
+which the independent layout oracles and the hashes are updated.
+
+Each entry records in `source` its component (such as `target/layer-0.bin`),
+the digest of the source data it was written from and the source path.
+Publishing an entry removes the complete entries it supersedes: the same
+component from the same source data under another key, which an earlier
+preparation identity wrote, and entries of earlier Splash versions prepared from
+the same source path. Entries of other sources or revisions, which
+installations may share, stay. Removal happens under the converter lock, so no
+entry being written is touched, and a running process keeps the files it has
+mapped until it unmaps them. Two builds of different preparation identities
+sharing one cache supersede each other's entries at every start; give a
+development build its own `SPLASH_WEIGHT_CACHE`.
+
+One writer per cache serializes conversion; complete cache hits bypass this
+lock. Each output's disk space is preallocated before writing. Interruption,
+disk-full errors and memory-pressure rejection cannot publish partial files;
+concurrent external disk activity can still exhaust the volume. Retrying removes
+abandoned writes under the converter lock and reuses previously completed
+files, which are read-only. Cold preparation reports each artifact's progress.
+
+Cold source hashing and output validation stream bounded buffers. Unchanged
+files reuse a digest proof tied to device, inode, size, birth time, mtime and
+ctime; a write or replacement invalidates it. This is not a full disk scrub on
+every startup. Preparation uses uncached destination I/O. Every adapter sizes
+its conversion steps to one staging bound, input and output together, of
+32 MiB (`kWeightPreparationStagingBytes`), whatever the tensor, layer or expert
+count, inside a 64 MiB admission reserve that also covers source metadata.
+Complete rows and multiple row tiles are processed together where possible,
+avoiding per-row I/O and small GPU waits. Startup runs two checks
+(`RuntimeResources.mm`), both stopped by cancellation. `admitWeightPreparation`,
+which the loaders receive as `admitConversion`, admits the conversion workspace
+on a cache miss, before anything is allocated and again before each chunk: it
+requires normal memory pressure and host headroom for the startup reserve plus
+the 64 MiB workspace. Cache hits, bounded source verification and every other
+Metal operation of startup pass `admitMetalOperation` instead, which critical
+pressure or too little headroom for the startup reserve still fails.
+
+`WeightFile` maps completed files, prepared or packed, read-only into one
+no-copy Metal buffer, so no model-sized anonymous allocation holds the weights.
+Runtime admission counts prepared weights, draft and vision exactly once
+(`preparedModelWeightBytes`, which `tune-kernels` and the runtime oracle use
+too). File
+backing does not make Metal-resident pages reclaimable: residency wires them
+until released. macOS page cache, driver allocations and other applications
+still affect memory pressure and swap.
+
+`loadQwenTarget` (`QwenTargetLoader.hpp`) reads a target's files
+(`QwenTargetFiles`: packed files, or the files `AffineTargetLoader` or
+`GgufTargetLoader` prepared) through the format that stores them.
+`AffineTargetFormat`, for packed and MLX-prepared files, reads every
+projection, a fused one too, as one affine Q4 tensor and the norms as bf16.
+`BlockTargetFormat`, for prepared GGUF images, reads each GGUF tensor as one
+block-quantized `QuantizedSegment` (a fused projection's tensors in output
+column order), the norms as F32, and keeps the GDN output projection's input
+in llama.cpp's tiled value-head order. Both Qwen families share one layout
+(`QwenHybridLayout`) and its validator.
+
+Operator plans use each projection's physical layout, `Affine64` or `Block32`,
+independently of the source container. `Projection`, `MoeWeights` and
+`EmbeddingWeights` (`runtime/ops/Weights.hpp`, `MoE.hpp`) hold either layout
+and represent different operator contracts. Arena sizing collects each
+projection's actual layout (a GGUF target's block projections beside its
+affine draft's) and reserves the vocabulary head only for decode.
+
+### GGUF targets
+
+The native loader requires every tensor it reads to have a type it accepts for
+that tensor and lists every unsupported tensor in one error:
+
+- linears and experts: Q4_K, Q5_K, Q6_K, Q3_K, IQ4_XS, IQ4_NL, Q8_0 or IQ3_S;
+- token embeddings: Q4_K, Q6_K or Q8_0;
+- norms, the MoE router and shared-expert scalar gate, and the GDN
+  convolution, decay and time-step bias: F32;
+- GDN alpha and beta: both Q8_0 or both F32.
+
+Of Unsloth's files in September 2026 that covers, for Qwen3.8-27B, UD-Q4_K_M
+and every larger file but Q4_1, UD-Q8_K_XL and BF16, and for Qwen3.6-35B-A3B,
+UD-IQ4_XS and every larger file but MXFP4_MOE, UD-Q8_K_XL and BF16. The smaller
+files need IQ3_XXS, IQ2, IQ1 or Q2_K kernels and the others Q4_0/Q4_1, MXFP4 or
+BF16 ones, which do not exist yet.
+
+At load time the engine validates the GGUF metadata and plans the `MDGG0001`
+layout. `GgufPreparation` stages rows in image order on the CPU within the
+staging bound, splitting rows wider than it into column chunks, runs the
+`gguf_repack` kernel, and writes its planes into a prepared file. Embeddings
+and F32 sections use bounded direct copies.
+
+Every tensor keeps its stored format: the F32 norm multipliers, GDN decay, the
+MoE router and shared-expert scalar gate, and GDN alpha/beta when a file
+stores them as F32 stay F32 and run in fp32, as llama.cpp keeps them (Apple10
+prefill chunks multiply the router and alpha/beta on the neural accelerator as
+three bf16 parts per weight that sum to it exactly, so only fp32 accumulation
+rounds). The GDN convolution and time-step bias become bf16 under the exact
+rule.
 
 Decode runs one of two kernel families, chosen by GPU family in `runtime/ops/LinearGguf.cpp`. On
 Apple9 (M3, M4) the register tile (`LinearTile::GgufRegister`) runs the kernels of
@@ -171,16 +311,25 @@ kernel uses, affine, GGUF or fp32, in `kernels/common/sgmatrix.h`.
 The ABIs are in `runtime/metal/abi/Gguf.h`, which also defines the tile geometry the kernels
 and `LinearGguf.cpp` share, and `MoE.h`; the image formats in
 `runtime/metal/abi/QuantFormat.h`, their decoding in `runtime/metal/kernels/common/quant_formats.h`
-and the decode-only value tables in `runtime/metal/abi/QuantTables.h`.
+and the decode-only value tables in `runtime/metal/abi/QuantTables.h`, which no prepared byte
+depends on; weight preparation's repack ABI is `runtime/metal/abi/GgufRepack.h`.
 
-The tests' CPU reference is `dev/tests/engine/GgufFormatReference.hpp`. `make test-engine-metal` runs
+The tests' CPU reference (`dev/tests/engine/GgufFormatReference.hpp`) must reproduce the golden
+hashes of upstream GGML's dequantization (llama.cpp 7ab4ee7) in `gguf-reference`, and
+`gguf-planner` checks the planner's plans; both run in `make test-engine-cpu`.
+`make test-engine-metal` runs `gguf-preparation`, which checks every format's planes, as the
+production executor and its `gguf_repack` kernel prepare them, bitwise against the reference,
+the prepared alpha/beta, norm, convolution and router bytes and the golden images; then
 `gguf-dequant`, the staged tile's dequantizer, built with the production Metal flags, against
 the half rounding of every reference weight; `gguf-projection`, every GGUF projection through
 `ops::Linear` with each tile forced, so both decode tiles run on every GPU, at one to four
 lanes, every K split and epilogue, fused segments, every gate/up format pair and the prefill
 tiles, each output inside the fp64 bound of `GgufFormatReference.hpp`; and `gguf-moe`: the float
 projections on both float tiles and the MoE layer on every GGUF plan, the staged 8- and 32-row
-tiles and the Apple9 register tile whatever GPU runs it, in every format, against fp64.
+tiles and the Apple9 register tile whatever GPU runs it, in every format, against fp64. The
+goldens and how to regenerate them are in `dev/tests/fixtures/weight-goldens/`; with
+`SPLASH_GGML_ORACLE=<libggml-base.dylib>`, `gguf-reference` also compares the reference with
+GGML directly and prints GGML's hashes.
 
 Two benchmark tools repeat the measurements behind the GGUF split tiers and MoE plans, with the
 weights DRAM-cold. `make benchmark-gguf-projection GGUF_PROJECTION_ARGS='q4k 5120 8192'` times one
@@ -422,20 +571,30 @@ make install test-real test-http-real MODEL=incoai/Qwen3.8-27B-Splash
 `make check` needs no model weights. `make check-native-cpu` builds production
 and runs native CPU tests without a GPU; `make check-native-metal` requires a
 supported Metal device and runs the kernel tests under shader validation. They
-include the GGUF kernels on synthetic tensors. Hosted CI runs CPU checks and
-sanitizers; the hardware release gate runs the full suite.
+include the preparation of small synthetic MLX, GGUF and vision sources and the
+GGUF kernels on synthetic tensors. Hosted CI runs CPU checks and sanitizers;
+the hardware release gate runs the full suite.
 
 Repeat model tests with `MODEL=incoai/Qwen3.6-35B-A3B-Splash`.
 Before release, install all four agents and run `make release-check MODEL=...`
 for both models from a clean checkout. It includes correctness, sanitizers,
 real HTTP/client behavior and performance checks.
 
+`make test-engine-cpu` builds the affine source oracle so it cannot break
+unnoticed, but no target runs it because it needs real models: after
+`make all build/engine-tests/affine-source-oracle`, pass it
+`build/splash.metallib`, an MLX model's Hub snapshot directory and the
+matching installed package to compare every prepared byte.
+
 Compare performance on the same idle Mac with the same model and workload.
 `make tune-kernels MODEL=...` measures the precompiled kernel candidates for the
 installed model on this Mac against the policy defaults in `runtime/ops` and
 prints, per key, the winner with its paired GPU and wall-time gain, spelled as
 the enumerators it would install, or that the default is kept; it changes no
-default and saves no profile. Keep generated reports, profiles, local paths
+default and saves no profile. For a GGUF model
+it measures only the attention kernels and the draft, and says so in its
+header, since GGUF projection and MoE plans read no tuned choice
+([GGUF targets](#gguf-targets)). Keep generated reports, profiles, local paths
 and experiment notes out of the source tree and commits.
 
 ### Local benchmarks
