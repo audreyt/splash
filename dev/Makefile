@@ -28,6 +28,10 @@ ENGINE_PYTHON_TEST_PATTERN ?= test_*.py
 # gates on a machine that lacks one of them; empty runs all four.
 AGENT_CLIENTS ?=
 AGENT_CLIENT_ARGS = $(if $(AGENT_CLIENTS),--clients $(AGENT_CLIENTS),)
+# smoke: implement and resume; complete adds compaction and cancellation.
+AGENT_SCENARIO ?= complete
+AGENT_ARGS = $(MODEL_ARGS) --package "$(MODEL_ROOT)" --scenario $(AGENT_SCENARIO) \
+	$(AGENT_CLIENT_ARGS)
 HTTP_SMOKE_ARGS ?=
 
 # Define native targets before aggregate prerequisites expand.
@@ -88,20 +92,19 @@ test: test-engine test-python test-models
 
 test-http-real: preflight $(TARGET) verify-build-identity
 	TRANSFORMERS_VERBOSITY=error $(PYTHON) dev/tests/smoke_real.py \
-		--model "$(MODEL)" $(HTTP_SMOKE_ARGS)
+		--model "$(MODEL)" --package "$(MODEL_ROOT)" $(HTTP_SMOKE_ARGS)
 
 agent-preflight: model-selection install-development
-	$(PYTHON) dev/tests/agent_real.py --model "$(MODEL)" --preflight-only $(AGENT_CLIENT_ARGS)
+	$(PYTHON) dev/tests/agent_real.py $(AGENT_ARGS) --preflight-only
 
 test-agent-real: preflight $(TARGET) agent-preflight verify-build-identity
-	TRANSFORMERS_VERBOSITY=error $(PYTHON) dev/tests/agent_real.py --model "$(MODEL)" \
-		$(AGENT_CLIENT_ARGS)
+	TRANSFORMERS_VERBOSITY=error $(PYTHON) dev/tests/agent_real.py $(AGENT_ARGS)
 
 # The release path loads the model once for generic HTTP and all four official
 # clients. The individual targets remain useful while diagnosing one surface.
 test-release-real: preflight $(TARGET) agent-preflight verify-build-identity
-	TRANSFORMERS_VERBOSITY=error $(PYTHON) dev/tests/agent_real.py \
-		--model "$(MODEL)" --http-smoke $(AGENT_CLIENT_ARGS)
+	TRANSFORMERS_VERBOSITY=error $(PYTHON) dev/tests/agent_real.py $(AGENT_ARGS) \
+		--http-smoke
 
 # Characterizes and validates one source identity. This target deliberately
 # does not claim an old/new regression result; that requires two retained

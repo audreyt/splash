@@ -170,9 +170,9 @@ class AgentRunnerTests(unittest.TestCase):
                 line for line in makefile.splitlines() if line.startswith(target + ":")
             )
             self.assertIn("verify-build-identity", prerequisites)
-        self.assertIn('dev/tests/agent_real.py --model "$(MODEL)"', makefile)
-        self.assertIn('--model "$(MODEL)" --http-smoke', makefile)
-        self.assertIn('--model "$(MODEL)" $(HTTP_SMOKE_ARGS)', makefile)
+        self.assertIn('AGENT_ARGS = $(MODEL_ARGS) --package "$(MODEL_ROOT)"', makefile)
+        self.assertEqual(makefile.count("dev/tests/agent_real.py $(AGENT_ARGS)"), 3)
+        self.assertIn('--model "$(MODEL)" --package "$(MODEL_ROOT)"', makefile)
 
     def test_model_is_required(self):
         for arguments in ([], ["--preflight-only"]):

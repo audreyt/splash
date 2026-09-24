@@ -804,6 +804,14 @@ def parse_args(argv=None):
         type=launcher.model_artifacts.parse_model_id,
         required=True,
     )
+    # The installation's source options, which splash serve is given, and
+    # its selection link (install/models.py link), which they name by default.
+    parser.add_argument("--revision")
+    parser.add_argument(
+        "--draft-model", type=launcher.model_artifacts.parse_draft_model
+    )
+    parser.add_argument("--language-only", action="store_true")
+    parser.add_argument("--package", type=Path)
     parser.add_argument("--max-context", default="100K")
     # Complete runs include several long-context turns and can take minutes.
     parser.add_argument("--client-timeout", type=float, default=900)
@@ -813,7 +821,16 @@ def parse_args(argv=None):
     parser.add_argument(
         "--output", type=Path, default=ROOT / "build/release/agent-real.json"
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.package is None:
+        args.package = launcher.model_artifacts.Selection.of(
+            launcher.model_artifacts.MODELS,
+            args.model,
+            revision=args.revision,
+            language_only=args.language_only,
+            draft_model=args.draft_model,
+        ).link
+    return args
 
 
 def main(argv=None):
@@ -864,6 +881,9 @@ def main(argv=None):
                 args.max_context,
                 "--model",
                 args.model,
+                *(("--revision", args.revision) if args.revision else ()),
+                *(("--draft-model", args.draft_model) if args.draft_model else ()),
+                *(("--language-only",) if args.language_only else ()),
             ]
             with (directory / "server.log").open("x") as log:
                 process = subprocess.Popen(
@@ -901,11 +921,8 @@ def main(argv=None):
         port = launcher.PORT
         if args.http_smoke:
             smoke_real.run(port, model)
-        installed = launcher.model_artifacts.selection_link(
-            launcher.model_artifacts.MODELS, args.model
-        )
         reference = (
-            reference_fixture(installed / "tokenizer", context)
+            reference_fixture(args.package / "tokenizer", context)
             if args.scenario == "complete"
             else ""
         )
