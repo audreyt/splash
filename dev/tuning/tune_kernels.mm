@@ -104,19 +104,6 @@ Options parse(int argc, char **argv) {
   return options;
 }
 
-uint64_t packageBytes(const std::filesystem::path &root) {
-  uint64_t total = 0;
-  for (const std::string_view directory : {"target", "draft", "vision"}) {
-    for (const auto &entry : std::filesystem::recursive_directory_iterator(root / directory)) {
-      if (!entry.is_regular_file()) continue;
-      constexpr uint64_t padding = model::kWeightFileAlignment - 1;
-      total += (entry.file_size() + padding) & ~padding;
-    }
-  }
-  if (!total) throw std::invalid_argument("empty model package");
-  return total;
-}
-
 // The choice lines are pasted as code, so an enumerator prints as the token of
 // its own case label: a rename changes both, and -Wswitch catches a new one.
 #define ENUMERATOR_NAME(enumerator) \
@@ -407,12 +394,12 @@ int main(int argc, char **argv) {
       deviceName = device.deviceName;
       gpuFamily = device.appleGpuFamily;
       if (const auto error = device.validationError()) throw std::runtime_error(*error);
-      const uint64_t margin =
-          engine::EngineMemoryPolicy::workingSetMarginBytes(device.recommendedMaxWorkingSetBytes);
-      if (device.recommendedMaxWorkingSetBytes <= margin)
+      const uint64_t budget =
+          engine::EngineMemoryPolicy::hardBudgetBytes(device.recommendedMaxWorkingSetBytes);
+      if (!budget)
         throw std::runtime_error("device working set does not cover its protected margin");
       engine::MemoryGovernor governor(
-          backend, device.recommendedMaxWorkingSetBytes - margin,
+          backend, budget,
           engine::EngineMemoryPolicy::hostAvailableReserveBytes(device.physicalMemoryBytes));
       const MeasurementStop underPressure = [&] {
         const auto state = governor.snapshot();
@@ -425,9 +412,10 @@ int main(int argc, char **argv) {
         return !interrupted && !underPressure() && governed(bytes, allocate);
       };
 
+      const auto descriptor = model::inspectModelPackage(modelRoot);
       std::optional<model::ModelPackage> package;
-      if (!admit(packageBytes(modelRoot),
-                 [&] { package.emplace(model::loadModelPackage(backend, modelRoot)); }))
+      if (!admit(model::preparedModelWeightBytes(modelRoot, descriptor),
+                 [&] { package.emplace(model::loadModelPackage(backend, modelRoot, descriptor)); }))
         throw std::runtime_error("model package memory admission denied or interrupted");
       const auto workloads =
           model::collectTuningWorkloads(*package, kPrefillProbeRows, kDecodeProbeWidths);
@@ -438,7 +426,13 @@ int main(int argc, char **argv) {
                 << SPLASH_BUILD_ID << "\n  " << options.measurement.samplePairs
                 << " pairs per candidate, " << options.measurement.maximumWallSeconds
                 << " s per key (attention " << options.measurement.maximumWallSeconds * 4
-                << " s per policy)\n\n";
+                << " s per policy)\n";
+      // The workloads keep only Affine64 weights, and a GGUF source prepares
+      // every target projection and expert as Block32.
+      if (descriptor.targetSource == model::TargetSource::Gguf)
+        std::cout << "  GGUF target: its projections and experts follow the device policy; "
+                     "only attention and the draft are measured\n";
+      std::cout << '\n';
 
       MeasurementOptions attention = options.measurement;
       attention.maximumWallSeconds = options.measurement.maximumWallSeconds * 4;
