@@ -2002,7 +2002,7 @@ def main():
             args.max_new_tokens,
             args.request_timeout,
             readiness.max_concurrent_requests,
-            constraint_factory,
+            constraint_factory=constraint_factory,
             max_image_pixels=args.max_image_pixels,
             thinking_codec=thinking_codec,
             served_model_names=args.served_model_name,

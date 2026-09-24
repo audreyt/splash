@@ -29,6 +29,7 @@ from server import output as model_output
 from server import protocol as native_wire
 from server import server as api
 from server.api_shapes import _namespace_alias, normalize_responses_input
+from server.thinking import ThinkingCodec
 from server.tool_schema import MAX_JSON_NESTING, _grammar_compatible_schema
 
 
@@ -504,6 +505,34 @@ class FakeConstraintFactory:
         return {}
 
 
+class PassThroughConstraintFactory:
+    """Leaves generation unconstrained, for tests that do not check grammars."""
+
+    def create(self, grammar, *, timeout=None):
+        return None
+
+    def stats(self):
+        return {}
+
+
+def make_frontend(
+    tokenizer, *args, constraint_factory=None, thinking_codec=None, **options
+):
+    """A frontend over the tokenizer. Unless a test passes its own,
+    generation is unconstrained and thinking is signed with a fresh key."""
+    if constraint_factory is None:
+        constraint_factory = PassThroughConstraintFactory()
+    if thinking_codec is None:
+        thinking_codec = ThinkingCodec()
+    return request_frontend.Frontend(
+        tokenizer,
+        *args,
+        constraint_factory=constraint_factory,
+        thinking_codec=thinking_codec,
+        **options,
+    )
+
+
 class Harness:
     def __init__(
         self,
@@ -530,7 +559,7 @@ class Harness:
         self.backend = backend_api.NativeBackend(
             runtime, self.tokenizer, request_logger=request_logger
         )
-        self.app = request_frontend.Frontend(
+        self.app = make_frontend(
             self.tokenizer,
             self.backend,
             model,
@@ -538,7 +567,7 @@ class Harness:
             default_max_new,
             timeout,
             2,
-            constraint_factory,
+            constraint_factory=constraint_factory,
             thinking_codec=thinking_codec,
             **frontend_options,
         )
@@ -1342,7 +1371,7 @@ class ServerTest(unittest.TestCase):
     def test_judgment_deadline_stops_the_slot_boundary_pass(self):
         clock = [100.0]
         tokenizer = self.BoundaryCountingTokenizer(clock, 0.5)
-        app = request_frontend.Frontend(tokenizer, None, "test-model", 8192, 16, 10, 2)
+        app = make_frontend(tokenizer, None, "test-model", 8192, 16, 10, 2)
         body = self.judgment_body(
             options=[
                 {"id": f"opt{index}", "description": f"case {index}"}
@@ -1363,7 +1392,7 @@ class ServerTest(unittest.TestCase):
 
     def test_judgment_context_budget_precedes_the_slot_boundary_pass(self):
         tokenizer = self.BoundaryCountingTokenizer()
-        app = request_frontend.Frontend(tokenizer, None, "test-model", 8, 16, 10, 2)
+        app = make_frontend(tokenizer, None, "test-model", 8, 16, 10, 2)
         with self.assertRaises(api.APIError) as error:
             app.prepare_judgment(
                 self.judgment_body(
@@ -3030,13 +3059,9 @@ class ServerTest(unittest.TestCase):
         tokenizer = FakeTokenizer()
         backend = backend_api.NativeBackend(FakeRuntime(), tokenizer)
         self.addCleanup(backend.close)
-        app = request_frontend.Frontend(
-            tokenizer, backend, "test-model", 40000, 32768, 1, 2
-        )
+        app = make_frontend(tokenizer, backend, "test-model", 40000, 32768, 1, 2)
         self.assertEqual(app.prepare(self.body())[0].max_new_tokens, 32768)
-        app = request_frontend.Frontend(
-            tokenizer, backend, "test-model", 10, 32768, 1, 2
-        )
+        app = make_frontend(tokenizer, backend, "test-model", 10, 32768, 1, 2)
         self.assertEqual(app.prepare(self.body())[0].max_new_tokens, 8)
         with mock.patch("sys.stderr"):
             for option, value in (
@@ -3065,10 +3090,8 @@ class ServerTest(unittest.TestCase):
         with mock.patch.object(
             api.secrets, "token_hex", side_effect=("boot_a", "boot_b")
         ):
-            first = request_frontend.Frontend(
-                tokenizer, first_backend, "test-model", 128, 16, 1, 2
-            )
-            second = request_frontend.Frontend(
+            first = make_frontend(tokenizer, first_backend, "test-model", 128, 16, 1, 2)
+            second = make_frontend(
                 tokenizer, second_backend, "test-model", 128, 16, 1, 2
             )
         first_job, _, _ = first.prepare(self.body(seed=1))
@@ -4688,7 +4711,7 @@ class ServerTest(unittest.TestCase):
         tokenizer = FakeTokenizer()
         backend = backend_api.NativeBackend(FakeRuntime(), tokenizer)
         self.addCleanup(backend.close)
-        app = request_frontend.Frontend(tokenizer, backend, "test-model", 128, 16, 1, 2)
+        app = make_frontend(tokenizer, backend, "test-model", 128, 16, 1, 2)
         tools = [
             {"type": "function", "function": {"name": "f"}},
             {"type": "function", "function": {"name": "g"}},
@@ -5057,7 +5080,7 @@ class ServerTest(unittest.TestCase):
         tokenizer = FakeTokenizer()
         backend = backend_api.NativeBackend(FakeRuntime(), tokenizer)
         self.addCleanup(backend.close)
-        app = request_frontend.Frontend(tokenizer, backend, "test-model", 128, 16, 1, 2)
+        app = make_frontend(tokenizer, backend, "test-model", 128, 16, 1, 2)
         for effort in ("xhigh", "medium", "low"):
             app.prepare(self.body(reasoning_effort=effort))
             template = tokenizer.templates[-1][1]
@@ -5136,8 +5159,8 @@ class ServerTest(unittest.TestCase):
             }
         )
         factory = FakeConstraintFactory()
-        app = request_frontend.Frontend(
-            tokenizer, None, "test-model", 128, 16, 1, 2, factory
+        app = make_frontend(
+            tokenizer, None, "test-model", 128, 16, 1, 2, constraint_factory=factory
         )
         for tools, expected in (([], False), ([self.rich_weather_tool()], True)):
             body = self.body(tools=tools)
@@ -5185,9 +5208,7 @@ class ServerTest(unittest.TestCase):
             ),
         ):
             tokenizer = TemplateTokenizer(self.reasoning_template(efforts=accepted))
-            app = request_frontend.Frontend(
-                tokenizer, None, "test-model", 128, 16, 1, 2
-            )
+            app = make_frontend(tokenizer, None, "test-model", 128, 16, 1, 2)
             for effort in ("minimal", "low", "medium", "high", "xhigh", "max"):
                 with self.subTest(accepted=accepted, effort=effort):
                     tokenizer.templates.clear()
@@ -5204,7 +5225,7 @@ class ServerTest(unittest.TestCase):
 
     def test_reasoning_template_errors_do_not_silently_drop_effort(self):
         tokenizer = TemplateTokenizer(self.reasoning_template(efforts=("medium",)))
-        app = request_frontend.Frontend(tokenizer, None, "test-model", 128, 16, 1, 2)
+        app = make_frontend(tokenizer, None, "test-model", 128, 16, 1, 2)
         with self.assertRaises(api.APIError):
             app.prepare(self.body(reasoning_effort="high"))
         self.assertEqual(
@@ -5221,7 +5242,7 @@ class ServerTest(unittest.TestCase):
 
     def test_reasoning_effort_accepts_only_standard_protocol_values(self):
         tokenizer = FakeTokenizer()
-        app = request_frontend.Frontend(tokenizer, None, "test-model", 128, 16, 1, 2)
+        app = make_frontend(tokenizer, None, "test-model", 128, 16, 1, 2)
         for effort in ("", "on", "off", "ultra", True, 1, [], {}):
             with (
                 self.subTest(effort=effort),
@@ -5242,9 +5263,7 @@ class ServerTest(unittest.TestCase):
             tokenizer = TemplateTokenizer(
                 "{{ '<|im_start|>assistant\\n" + prefix + "' }}"
             )
-            app = request_frontend.Frontend(
-                tokenizer, None, "test-model", 128, 16, 1, 2
-            )
+            app = make_frontend(tokenizer, None, "test-model", 128, 16, 1, 2)
             with (
                 self.subTest(effort=effort),
                 self.assertRaisesRegex(api.APIError, "requested thinking mode"),
@@ -5274,7 +5293,7 @@ class ServerTest(unittest.TestCase):
 
     def test_anthropic_thinking_off_is_not_reenabled_by_effort(self):
         tokenizer = TemplateTokenizer(self.reasoning_template())
-        app = request_frontend.Frontend(tokenizer, None, "test-model", 128, 16, 1, 2)
+        app = make_frontend(tokenizer, None, "test-model", 128, 16, 1, 2)
         for thinking in (None, {"type": "disabled"}):
             body = self.anthropic_body(output_config={"effort": "high"})
             if thinking is not None:
@@ -5715,7 +5734,7 @@ class ServerTest(unittest.TestCase):
 
     def test_frontend_limits_generation_and_token_count_preparation_to_two(self):
         tokenizer = BlockingTokenizer()
-        app = request_frontend.Frontend(
+        app = make_frontend(
             tokenizer,
             SimpleNamespace(status=lambda: {}),
             "test-model",
@@ -5759,7 +5778,7 @@ class ServerTest(unittest.TestCase):
 
     def test_frontend_rejects_invalid_preparation_capacity(self):
         with self.assertRaisesRegex(ValueError, "preparation capacity"):
-            request_frontend.Frontend(
+            make_frontend(
                 FakeTokenizer(),
                 SimpleNamespace(status=lambda: {}),
                 "test-model",
@@ -5840,9 +5859,7 @@ class ServerTest(unittest.TestCase):
             self.assertEqual(caught.exception.code, "context_length_exceeded")
 
     def test_preparation_consumes_original_deadline_and_releases_slots(self):
-        app = request_frontend.Frontend(
-            FakeTokenizer(), None, "test-model", 128, 16, 10, 1
-        )
+        app = make_frontend(FakeTokenizer(), None, "test-model", 128, 16, 10, 1)
         for elapsed in (0.25, 5):
             clock = [100.0]
 
@@ -5874,9 +5891,7 @@ class ServerTest(unittest.TestCase):
                 app.preparation_slots.release()
 
     def test_preparation_queue_respects_request_timeout(self):
-        app = request_frontend.Frontend(
-            FakeTokenizer(), None, "test-model", 128, 16, 10, 1
-        )
+        app = make_frontend(FakeTokenizer(), None, "test-model", 128, 16, 10, 1)
         app.preparation_slots.acquire()
         try:
             with self.assertRaises(api.APIError) as error:
@@ -5890,9 +5905,7 @@ class ServerTest(unittest.TestCase):
             app.preparation_slots.release()
 
     def test_expired_preparation_skips_later_stages(self):
-        app = request_frontend.Frontend(
-            FakeTokenizer(), None, "test-model", 128, 16, 10, 1
-        )
+        app = make_frontend(FakeTokenizer(), None, "test-model", 128, 16, 10, 1)
         for stage in ("grammar", "images"):
             clock = [100.0]
 
@@ -6318,7 +6331,7 @@ class ServerTest(unittest.TestCase):
         tokenizer = FakeTokenizer()
         backend = backend_api.NativeBackend(FakeRuntime(), tokenizer)
         self.addCleanup(backend.close)
-        app = request_frontend.Frontend(tokenizer, backend, "test-model", 128, 16, 1, 2)
+        app = make_frontend(tokenizer, backend, "test-model", 128, 16, 1, 2)
         body = self.body()
         body.pop("temperature")
         with mock.patch("server.frontend.secrets.randbits", return_value=123):

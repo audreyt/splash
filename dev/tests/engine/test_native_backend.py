@@ -8,10 +8,10 @@ import unittest
 from unittest import mock
 
 from dev.tests.engine.test_runtime import FakeFactory
+from dev.tests.test_server import make_frontend
 from server import backend as backend_api
 from server import constraints as generation_constraints
 from server import errors as api_errors
-from server import frontend as request_frontend
 from server import images, runtime
 from server import protocol as wire
 
@@ -248,9 +248,7 @@ class NativeBackendContractTests(unittest.TestCase):
 
     def test_http_fields_reach_native_generation_request(self):
         transport, runtime = self.make_transport()
-        app = request_frontend.Frontend(
-            FakeTokenizer(), transport, "test-model", 128, 32, 10, 2
-        )
+        app = make_frontend(FakeTokenizer(), transport, "test-model", 128, 32, 10, 2)
         job, _thinking, _tools = app.prepare(
             {
                 "model": "test-model",

@@ -30,7 +30,6 @@ if __package__:
     from .errors import APIError, ContextLengthError
     from .latency import LatencyMetrics
     from .metrics import is_finite_number
-    from .thinking import ThinkingCodec
     from .tokenization import PromptTokenizer
     from .tool_schema import (
         THINK_END,
@@ -57,7 +56,6 @@ else:
     from errors import APIError, ContextLengthError
     from latency import LatencyMetrics
     from metrics import is_finite_number
-    from thinking import ThinkingCodec
     from tokenization import PromptTokenizer
     from tool_schema import (
         THINK_END,
@@ -220,9 +218,10 @@ class Frontend:
         default_max_new,
         request_timeout,
         preparation_capacity,
-        constraint_factory=None,
+        *,
+        constraint_factory,
+        thinking_codec,
         max_image_pixels=image_input.MAX_PIXELS,
-        thinking_codec=None,
         served_model_names=(),
         default_reasoning_effort=None,
     ):
@@ -260,9 +259,7 @@ class Frontend:
         self.preparation_active = 0
         self.preparation_waiting = 0
         self.response_store = ResponseStore()
-        self.thinking_codec = (
-            ThinkingCodec() if thinking_codec is None else thinking_codec
-        )
+        self.thinking_codec = thinking_codec
 
     def accepts_model(self, model):
         return isinstance(model, str) and model in self.model_names
@@ -275,8 +272,7 @@ class Frontend:
                 "active": self.preparation_active,
                 "waiting": self.preparation_waiting,
             }
-        if self.constraint_factory is not None:
-            status["grammar_cache"] = self.constraint_factory.stats()
+        status["grammar_cache"] = self.constraint_factory.stats()
         status["response_store"] = self.response_store.stats()
         status["image_cache"] = self.images.stats()
         status["tokenizer_cache"] = self.prompt_tokenizer.stats()
@@ -903,9 +899,7 @@ class Frontend:
         image_positions, thinking = rendered.image_positions, rendered.thinking
         constraint = None
         remaining_request_time(deadline)
-        if self.constraint_factory is not None and (
-            tools or response_schema is not None
-        ):
+        if tools or response_schema is not None:
             with self.latencies.measure("grammar"):
                 if tools:
                     constraint = self.constraint_factory.create(
