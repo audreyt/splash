@@ -26,6 +26,8 @@ MODEL_ARGS = --model "$(MODEL)" $(if $(REVISION),--revision "$(REVISION)") \
 MODEL_INSTALL = $(PYTHON) install/models.py $(MODEL_ARGS)
 # The installation's selection link, as the installer names it.
 MODEL_ROOT = $(if $(MODEL),$(shell $(MODEL_INSTALL) link))
+# Where the release targets record the model's results.
+MODEL_RESULTS = build/release/$(subst /,--,$(MODEL))
 
 BUILD := build
 TARGET := $(BUILD)/splash
@@ -153,8 +155,12 @@ preflight: model-selection
 	@$(PYTHON) -m pip check >/dev/null
 	@TRANSFORMERS_VERBOSITY=error $(PYTHON) -c 'import server.server'
 
+# The installer's restarts without the Hub, a full source hash and the
+# prepared weights a load of the installation wrote (DEVELOPMENT.md, Release
+# check).
 verify-models: preflight
-	@$(MODEL_INSTALL) verify --full
+	@$(PYTHON) dev/tools/installer_restarts.py $(MODEL_ARGS) \
+		--output "$(MODEL_RESULTS)/prepared.json"
 
 serve: preflight $(TARGET)
 	./splash serve $(MODEL_ARGS)

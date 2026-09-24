@@ -63,7 +63,8 @@ test-python: install-development
 # prepared-weight identity tests; none downloads or loads real weights.
 test-models: install-development
 	$(PYTHON) -m unittest dev/tests/test_models.py dev/tests/test_upstream.py \
-		dev/tests/test_weight_preparation_identity.py dev/tests/test_gguf_metadata.py
+		dev/tests/test_weight_preparation_identity.py dev/tests/test_gguf_metadata.py \
+		dev/tests/test_installer_restarts.py
 
 check-python-engine: install-development test-python test-models
 	$(PYTHON) -m compileall -q server install/*.py \
