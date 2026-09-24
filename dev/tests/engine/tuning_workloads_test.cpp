@@ -139,7 +139,7 @@ std::set<LinearWorkload> expectedLinear(
   };
   for (auto phase : {LinearPhase::Prefill, LinearPhase::Decode}) {
     for (auto matrix : {LinearMatrix{target.packedGdnWidth, target.hiddenSize},
-                         LinearMatrix{target.packedAttentionWidth, target.hiddenSize},
+                         LinearMatrix{target.packedFullWidth, target.hiddenSize},
                          LinearMatrix{draft.hiddenSize, draft.targetHiddenSize},
                          LinearMatrix{draft.qkvSize, draft.hiddenSize}})
       add(matrix, phase, LinearEpilogue::None);
@@ -221,9 +221,9 @@ void checkPair(ModelPackage package, bool sparse) {
   std::set<MoeWorkload> expectedMoe;
   if (sparse) {
     for (uint32_t rows : prefill)
-      expectedMoe.insert({geometry.moe, rows, MoePhase::Prefill});
+      expectedMoe.insert({geometry.moeShape(), rows, MoePhase::Prefill});
     for (uint32_t width : decode)
-      expectedMoe.insert({geometry.moe, width * 8, MoePhase::Decode});
+      expectedMoe.insert({geometry.moeShape(), width * 8, MoePhase::Decode});
   }
   require(actualMoe == expectedMoe, "dense/sparse FFN inventory is incorrect");
 
@@ -277,9 +277,7 @@ void blockTarget() {
     }, layer.mixer);
     layer.ffn = BlockMoeWeights{};
   }
-  // The geometry takes the MoE layout from the weights only from P2 on.
-  MoeShape shape = qwenTargetGeometry(target).moe;
-  shape.weightLayout = WeightLayout::Block32;
+  const MoeShape shape = qwenTargetGeometry(target).moeShape();
   package.target = std::move(target);
   DFlashDraftLayout draft;
   draft.layers = 6;
@@ -297,6 +295,7 @@ void blockTarget() {
                 input.matrix != LinearMatrix{layout.packedGdnWidth, layout.hiddenSize} &&
                 input.matrix != LinearMatrix{layout.packedFullWidth, layout.hiddenSize},
             "a GGUF target's projections were collected for tuning");
+  require(shape.weightLayout == WeightLayout::Block32, "the block target lost its MoE layout");
   splash::DeviceCapabilities device;
   device.appleGpuFamily = 10;
   device.gpuCoreCount = 16;
