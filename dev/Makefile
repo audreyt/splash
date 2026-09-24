@@ -124,19 +124,20 @@ test-performance-real: preflight $(TARGET) $(TEST_BACKEND_BENCHMARK) $(LIB)
 		test $$status -eq 0 || exit $$status
 	@echo "native backend characterization: PASS (build/release/backend-benchmark.json)"
 
-# One final source identity: model-free correctness, sanitizers, real-model
-# correctness, one shared HTTP/four-client server, then native performance.
-release-check: check preflight
+# One model on this machine (DEVELOPMENT.md, Release check); make check and
+# test-sanitizers run once per source identity, check-native-metal and the
+# agent clients once per machine. verify-models follows test-real, whose load
+# prepares the weights it records.
+release-check: preflight
 	@test -z "$$(git status --porcelain)" || { \
 		echo "error: release checkout is not clean" >&2; \
 		git status --short >&2; \
 		exit 1; \
 	}
-	$(MAKE) --no-print-directory verify-models
 	$(MAKE) --no-print-directory verify-build-identity
-	$(MAKE) --no-print-directory test-sanitizers
 	$(MAKE) --no-print-directory test-real
-	$(MAKE) --no-print-directory test-release-real
+	$(MAKE) --no-print-directory verify-models
+	$(MAKE) --no-print-directory test-http-real
 	$(MAKE) --no-print-directory test-performance-real
 	@test -z "$$(git status --porcelain)" || { \
 		echo "error: release checkout is not clean" >&2; \
