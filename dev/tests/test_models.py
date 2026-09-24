@@ -604,7 +604,11 @@ class ModelArtifactTest(unittest.TestCase):
         args = installer.parse_args(["--model", self.MODEL_ID, "prepare"])
         self.assertEqual((args.command, args.model), ("prepare", self.MODEL_ID))
         makefile = (Path(__file__).resolve().parents[2] / "Makefile").read_text()
-        self.assertIn('$(MODEL_INSTALL) --model "$(MODEL)" prepare', makefile)
+        self.assertIn(
+            "MODEL_INSTALL = $(PYTHON) install/models.py $(MODEL_ARGS)", makefile
+        )
+        self.assertIn('MODEL_ARGS = --model "$(MODEL)"', makefile)
+        self.assertIn("\t$(MODEL_INSTALL) prepare\n", makefile)
 
     def test_prepare_atomically_installs_then_reuses_offline_without_hashing_weights(
         self,
@@ -764,6 +768,34 @@ class ModelArtifactTest(unittest.TestCase):
         self.assertEqual(
             installer.selection_link(models, "owner/repo"), models / "owner/repo"
         )
+
+    def test_link_prints_the_selection_link_of_the_source_options(self):
+        # make's MODEL_ROOT is this output; a relative draft folder names the
+        # installation splash serve --draft-model selects from the same folder.
+        models = self.root / "models"
+        draft = self.root / "draft"
+        draft.mkdir()
+        for arguments, options in (
+            (["--model", "owner/repo:UD-Q4_K_M"], {}),
+            (
+                ["--model", "owner/repo", "--revision", "b" * 40, "--language-only"]
+                + ["--draft-model", os.path.relpath(draft)],
+                {
+                    "revision": "b" * 40,
+                    "language_only": True,
+                    "draft_model": str(draft.resolve()),
+                },
+            ),
+        ):
+            with (
+                self.subTest(arguments=arguments),
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                self.assertEqual(
+                    installer.main(["--models", str(models), *arguments, "link"]), 0
+                )
+            link = installer.selection_link(models.resolve(), arguments[1], **options)
+            self.assertEqual(output.getvalue(), f"{link}\n")
 
     def test_a_package_takes_no_variant(self):
         snapshot, _ = self.package_fixture()

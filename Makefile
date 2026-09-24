@@ -14,9 +14,18 @@ REQUIREMENTS := install/requirements.txt
 PYTHON_CANDIDATES := python3.13 python3 python3.12 python3.14
 BUILD_ID_PYTHON ?= python3
 SPLASH_MAKEFILE := $(abspath $(firstword $(MAKEFILE_LIST)))
-MODEL_INSTALL = $(PYTHON) install/models.py
 MODEL ?=
-MODEL_ROOT := install/models/$(MODEL)
+# MODEL with the installer's source options selects one installation
+# (DEVELOPMENT.md, Upstream model loading); every model target passes them.
+REVISION ?=
+DRAFT_MODEL ?=
+LANGUAGE_ONLY ?=
+MODEL_ARGS = --model "$(MODEL)" $(if $(REVISION),--revision "$(REVISION)") \
+	$(if $(DRAFT_MODEL),--draft-model "$(DRAFT_MODEL)") \
+	$(if $(LANGUAGE_ONLY),--language-only)
+MODEL_INSTALL = $(PYTHON) install/models.py $(MODEL_ARGS)
+# The installation's selection link, as the installer names it.
+MODEL_ROOT = $(if $(MODEL),$(shell $(MODEL_INSTALL) link))
 
 BUILD := build
 TARGET := $(BUILD)/splash
@@ -57,7 +66,7 @@ install: model-selection platform-check
 		-f "$(SPLASH_MAKEFILE)" _install
 
 _install: model-selection _install-environment
-	$(MODEL_INSTALL) --model "$(MODEL)" prepare
+	$(MODEL_INSTALL) prepare
 
 model-selection:
 	@test -n "$(MODEL)" || { \
@@ -140,15 +149,15 @@ preflight: model-selection
 		echo "error: Splash is not installed; run 'make install MODEL=$(MODEL)' first" >&2; \
 		exit 1; \
 	}
-	@$(MODEL_INSTALL) --model "$(MODEL)" verify
+	@$(MODEL_INSTALL) verify
 	@$(PYTHON) -m pip check >/dev/null
 	@TRANSFORMERS_VERBOSITY=error $(PYTHON) -c 'import server.server'
 
 verify-models: preflight
-	@$(MODEL_INSTALL) --model "$(MODEL)" verify --full
+	@$(MODEL_INSTALL) verify --full
 
 serve: preflight $(TARGET)
-	./splash serve --model "$(MODEL)"
+	./splash serve $(MODEL_ARGS)
 
 $(BUILD):
 	mkdir -p $(BUILD)

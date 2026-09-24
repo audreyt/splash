@@ -111,7 +111,7 @@ test-performance-real: preflight $(TARGET) $(TEST_BACKEND_BENCHMARK) $(LIB)
 		--header $(BUILD_ID_HEADER) --stamp $(BUILD_ID_STAMP) \
 		$(BUILD_ID_CONSTANT_ARGS) --binary $(TEST_BACKEND_BENCHMARK)
 	@set +e; \
-		$(TEST_BACKEND_BENCHMARK) $(LIB) $(MODEL_ROOT) --samples 5 \
+		$(TEST_BACKEND_BENCHMARK) $(LIB) "$(MODEL_ROOT)" --samples 5 \
 			--progress build/release/backend-benchmark-progress.jsonl \
 			> build/release/backend-benchmark.json; \
 		status=$$?; \

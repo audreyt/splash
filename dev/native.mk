@@ -446,7 +446,7 @@ $(TUNE_KERNELS): dev/tuning/tune_kernels.mm $(TUNING_SOURCES) \
 # Run on an idle host after a kernel or policy change.
 .PHONY: tune-kernels
 tune-kernels: preflight $(TARGET) $(TUNE_KERNELS) $(LIB)
-	$(TUNE_KERNELS) $(LIB) $(MODEL_ROOT) $(TUNE_ARGS)
+	$(TUNE_KERNELS) $(LIB) "$(MODEL_ROOT)" $(TUNE_ARGS)
 
 $(TEST_ATTENTION_PLAN): dev/tests/engine/paged_attention_plan_test.mm \
 		$(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
@@ -680,7 +680,7 @@ benchmark-decode: all $(TEST_Q4_DECODE_PROFILE)
 # decode-profile replays the installed model's prefill and decode commands as
 # separate dispatches; DECODE_PROFILE_ARGS passes --prompt-tokens/--cycles.
 benchmark-decode-profile: preflight $(TARGET) $(TEST_DECODE_PROFILE) $(LIB)
-	$(TEST_DECODE_PROFILE) $(LIB) $(MODEL_ROOT) $(DECODE_PROFILE_ARGS)
+	$(TEST_DECODE_PROFILE) $(LIB) "$(MODEL_ROOT)" $(DECODE_PROFILE_ARGS)
 
 # Attention kernels alone on one layer of synthetic Q8 history across cache
 # lengths; ATTENTION_SWEEP_ARGS passes --histories/--shapes/--lanes/--repeat.
@@ -700,7 +700,7 @@ benchmark-gguf-moe: $(TEST_GGUF_MOE_BENCHMARK) $(LIB)
 	$(TEST_GGUF_MOE_BENCHMARK) $(LIB) $(GGUF_MOE_ARGS)
 
 benchmark-backend: preflight $(TARGET) $(TEST_BACKEND_BENCHMARK) $(LIB)
-	$(TEST_BACKEND_BENCHMARK) $(LIB) $(MODEL_ROOT)
+	$(TEST_BACKEND_BENCHMARK) $(LIB) "$(MODEL_ROOT)"
 
 # CPU tests that also run under the sanitizers: each is built three times
 # from the same sources.
