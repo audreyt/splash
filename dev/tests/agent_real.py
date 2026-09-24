@@ -29,6 +29,8 @@ from dev.tools import build_identity  # noqa: E402
 from install import clients, launcher  # noqa: E402
 
 CLIENTS = tuple(clients.INSTALL_URLS)
+# The server this harness starts or finds, on the default port.
+BASE_URL = launcher._base_url(launcher.PORT)
 TEST_COMMAND = "python3 -m unittest -v"
 
 
@@ -382,7 +384,7 @@ class ClientRun:
         argv, env = clients.command(
             self.name,
             self.path,
-            launcher.BASE_URL,
+            BASE_URL,
             self.model,
             self.context,
             launcher.RUNTIME_DIR,
@@ -656,7 +658,7 @@ class ClientRun:
             argv, env = clients.command(
                 self.name,
                 self.path,
-                launcher.BASE_URL,
+                BASE_URL,
                 self.model,
                 self.context,
                 launcher.RUNTIME_DIR,
@@ -795,7 +797,7 @@ def parse_args(argv=None):
     parser.add_argument("--clients", default=",".join(CLIENTS))
     parser.add_argument(
         "--model",
-        type=launcher.model_artifacts.parse_repo_id,
+        type=launcher.model_artifacts.parse_model_id,
         required=True,
     )
     parser.add_argument("--max-context", default="100K")
@@ -891,10 +893,10 @@ def main(argv=None):
         document["validation_script_sha256"] = hashlib.sha256(
             Path(__file__).read_bytes()
         ).hexdigest()
-        port = int(launcher.BASE_URL.rsplit(":", 1)[1])
+        port = launcher.PORT
         if args.http_smoke:
             smoke_real.run(port, model)
-        installed = launcher.model_artifacts.installed_root(
+        installed = launcher.model_artifacts.selection_link(
             launcher.model_artifacts.MODELS, args.model
         )
         reference = (

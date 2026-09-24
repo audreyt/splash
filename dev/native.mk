@@ -655,15 +655,18 @@ test-engine-metal: $(TEST_METAL_TARGETS)
 	$(METAL_TEST_ENV) $(TEST_METAL_BACKEND_TEST) $(TEST_METAL_BACKEND_LIB)
 
 .PHONY: test-real
-VISION_FIXTURE_incoai/Qwen3.8-27B-Splash := qwen3.8-27b
-VISION_FIXTURE_incoai/Qwen3.6-35B-A3B-Splash := qwen3.6-35b-a3b
-VISION_FIXTURE_incoai/Qwen3.8-27B-Splash := qwen3.8-27b
-VISION_FIXTURE_incoai/Qwen3.6-35B-A3B-Splash := qwen3.6-35b-a3b
+# The vision fixture is named after the installed model's family: model.json
+# for an upstream model, the manifest's model for a Splash package.
+VISION_FIXTURE_FAMILY := import json, pathlib, sys; root = pathlib.Path(sys.argv[1]); \
+	record = root / "model.json"; \
+	print((json.loads(record.read_text())["family"] if record.is_file() \
+	       else json.loads((root / "manifest.json").read_text())["model"]).lower())
 test-real: preflight $(TARGET) $(TEST_MODEL_RUNTIME_ORACLE) \
 		$(TEST_VISION_ENCODER_TEST) $(LIB)
-	$(METAL_TEST_ENV) $(TEST_VISION_ENCODER_TEST) $(LIB) $(MODEL_ROOT) \
-		dev/tests/fixtures/vision-parity/$(VISION_FIXTURE_$(MODEL))
-	$(TEST_MODEL_RUNTIME_ORACLE) $(LIB) $(MODEL_ROOT)
+	family=$$($(BUILD_ID_PYTHON) -c '$(VISION_FIXTURE_FAMILY)' "$(MODEL_ROOT)") && \
+		$(METAL_TEST_ENV) $(TEST_VISION_ENCODER_TEST) $(LIB) "$(MODEL_ROOT)" \
+		dev/tests/fixtures/vision-parity/$$family
+	$(TEST_MODEL_RUNTIME_ORACLE) $(LIB) "$(MODEL_ROOT)"
 
 .PHONY: benchmark-prefill benchmark-decode benchmark-backend \
 	benchmark-decode-profile benchmark-attention-sweep \

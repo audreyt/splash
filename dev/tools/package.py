@@ -24,6 +24,12 @@ INSTALL_FILES = (
     "clients.py",
     "paths.py",
     "models.py",
+    "hub.py",
+    "families.py",
+    "assembly.py",
+    "legacy.py",
+    "upstream.py",
+    "gguf.py",
     "catalog.py",
     "requirements.txt",
 )
@@ -131,7 +137,7 @@ class Splash < Formula
   def caveats
     <<~CAVEAT
       Serve a model:
-        splash serve --model incoai/Qwen3.8-27B-Splash
+        splash serve --model mlx-community/Qwen3.8-27B-4bit
     CAVEAT
   end
 
