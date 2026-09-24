@@ -656,16 +656,22 @@ test-engine-metal: $(TEST_METAL_TARGETS)
 
 .PHONY: test-real
 # The vision fixture is named after the installed model's family: model.json
-# for an upstream model, the manifest's model for a Splash package.
+# for an upstream model, the manifest's model for a Splash package. Nothing is
+# printed when the installation serves no vision (model.json's vision_format
+# is none: --language-only, or a GGUF without an mmproj); every package has it.
 VISION_FIXTURE_FAMILY := import json, pathlib, sys; root = pathlib.Path(sys.argv[1]); \
 	record = root / "model.json"; \
-	print((json.loads(record.read_text())["family"] if record.is_file() \
+	model = json.loads(record.read_text()) if record.is_file() else None; \
+	print("" if model and model["vision_format"] == "none" else \
+	      (model["family"] if model \
 	       else json.loads((root / "manifest.json").read_text())["model"]).lower())
 test-real: preflight $(TARGET) $(TEST_MODEL_RUNTIME_ORACLE) \
 		$(TEST_VISION_ENCODER_TEST) $(LIB)
 	family=$$($(BUILD_ID_PYTHON) -c '$(VISION_FIXTURE_FAMILY)' "$(MODEL_ROOT)") && \
-		$(METAL_TEST_ENV) $(TEST_VISION_ENCODER_TEST) $(LIB) "$(MODEL_ROOT)" \
-		dev/tests/fixtures/vision-parity/$$family
+		if test -n "$$family"; then \
+			$(METAL_TEST_ENV) $(TEST_VISION_ENCODER_TEST) $(LIB) "$(MODEL_ROOT)" \
+				dev/tests/fixtures/vision-parity/$$family; \
+		else echo "vision parity: skipped, the installation serves text only"; fi
 	$(TEST_MODEL_RUNTIME_ORACLE) $(LIB) "$(MODEL_ROOT)"
 
 .PHONY: benchmark-prefill benchmark-decode benchmark-backend \
