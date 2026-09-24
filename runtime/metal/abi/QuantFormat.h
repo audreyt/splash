@@ -1,7 +1,7 @@
 #pragma once
 
-// Quantized weight formats of the MDGG0001 image, shared by the host
-// operators, the GEMM kernels and the tests. A [N, K]
+// Quantized weight formats of the MDGG0001 image, shared by the host planner
+// and reader, the load-time repack, the GEMM kernels and the tests. A [N, K]
 // tensor with G = K / 32 groups per row is stored in tiles of T =
 // QUANT_TILE_ROWS rows as
 //   plane0 [N / T][G][T][plane0_bytes]
@@ -9,6 +9,10 @@
 //   meta   [N / T][G / meta_groups][T][meta_bytes]
 // A meta unit is one native block and holds its scale fields.
 //
+// Its contents are hashed into SPLASH_GGUF_PREPARATION_ID
+// (dev/tools/weight_preparation_identity.py): it holds what defines prepared
+// bytes, plus each format's kernel name token, which the host reads.
+// Editing this file re-prepares every GGUF model.
 // The decode-only value tables are in metal/abi/QuantTables.h.
 //
 // Inside a group of 32 the elements are in lane-owned chunk order: chunk c
