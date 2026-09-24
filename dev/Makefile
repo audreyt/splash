@@ -106,23 +106,31 @@ test-release-real: preflight $(TARGET) agent-preflight verify-build-identity
 	TRANSFORMERS_VERBOSITY=error $(PYTHON) dev/tests/agent_real.py $(AGENT_ARGS) \
 		--http-smoke
 
-# Characterizes and validates one source identity. This target deliberately
-# does not claim an old/new regression result; that requires two retained
-# benchmark binaries and same-machine alternating execution.
+# BASELINE is a checkout whose build/ holds the previous release's
+# splash.metallib and engine-tests/backend-benchmark: this build is compared
+# with it on this machine in ABBA order (dev/benchmarks/backend_regression.py).
+# Without it, the release scenarios characterize this build alone.
+BASELINE ?=
 test-performance-real: preflight $(TARGET) $(TEST_BACKEND_BENCHMARK) $(LIB)
-	@mkdir -p build/release
+	@mkdir -p "$(MODEL_RESULTS)"
 	@$(BUILD_ID_PYTHON) $(BUILD_ID_SCRIPT) check --root . \
 		--header $(BUILD_ID_HEADER) --stamp $(BUILD_ID_STAMP) \
 		$(BUILD_ID_CONSTANT_ARGS) --binary $(TEST_BACKEND_BENCHMARK)
+ifneq ($(BASELINE),)
+	$(PYTHON) -m dev.benchmarks.backend_regression --baseline "$(BASELINE)" \
+		--package "$(MODEL_ROOT)" --output-dir "$(MODEL_RESULTS)"
+else
 	@set +e; \
-		$(TEST_BACKEND_BENCHMARK) $(LIB) "$(MODEL_ROOT)" --samples 5 \
-			--progress build/release/backend-benchmark-progress.jsonl \
-			> build/release/backend-benchmark.json; \
+		$(TEST_BACKEND_BENCHMARK) $(LIB) "$(MODEL_ROOT)" \
+			--scenario decode,partial --samples 3 \
+			--progress "$(MODEL_RESULTS)/backend-benchmark-progress.jsonl" \
+			> "$(MODEL_RESULTS)/backend-benchmark.json"; \
 		status=$$?; \
-		$(PYTHON) -m json.tool build/release/backend-benchmark.json >/dev/null \
+		$(PYTHON) -m json.tool "$(MODEL_RESULTS)/backend-benchmark.json" >/dev/null \
 			|| exit 1; \
 		test $$status -eq 0 || exit $$status
-	@echo "native backend characterization: PASS (build/release/backend-benchmark.json)"
+	@echo "native backend characterization: PASS ($(MODEL_RESULTS)/backend-benchmark.json)"
+endif
 
 # One model on this machine (DEVELOPMENT.md, Release check); make check and
 # test-sanitizers run once per source identity, check-native-metal and the
