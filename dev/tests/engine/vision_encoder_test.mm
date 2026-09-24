@@ -13,6 +13,7 @@
 #include "metal/MetalBackend.hpp"
 #include "model/ModelFactory.hpp"
 #include "ops/Vision.hpp"
+#include "tuning/LinearNumerics.hpp"
 
 #import <Foundation/Foundation.h>
 
@@ -43,13 +44,6 @@ std::vector<uint8_t> readFile(const std::string &path) {
   return std::vector<uint8_t>(std::istreambuf_iterator<char>(file), {});
 }
 
-float fromBf16(uint16_t word) {
-  uint32_t bits = uint32_t{word} << 16;
-  float value;
-  std::memcpy(&value, &bits, sizeof(value));
-  return value;
-}
-
 MetalBuffer upload(MetalBackend &backend, const std::vector<uint8_t> &bytes,
                    const char *label) {
   MetalBuffer buffer =
@@ -75,7 +69,7 @@ std::vector<float> encodeOnce(MetalBackend &backend,
   const auto *words = static_cast<const uint16_t *>(embeddings.contents());
   std::vector<float> result(uint64_t{grid.mergedTokens()} * hiddenSize);
   for (uint64_t index = 0; index < result.size(); ++index)
-    result[index] = fromBf16(words[index]);
+    result[index] = splash::ops::tuning::bf16ToFloat(words[index]);
   return result;
 }
 
