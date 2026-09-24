@@ -12,14 +12,20 @@ using that SDK. Packaged users need none of these development tools.
 git clone https://github.com/incoai/splash.git
 cd splash
 make -j4
-./splash serve --model incoai/Qwen3.8-27B-Splash
+./splash serve --model mlx-community/Qwen3.8-27B-4bit
 ```
 
-`--model` requires a full Hugging Face `owner/repo` containing a Splash package.
-The first serve sets up Python dependencies, resolves a repository commit and
-verifies its manifest and artifacts. Later launches reuse the installed snapshot
-offline. Public packages need no login; private/gated packages need `HF_TOKEN`
-or `hf auth login`. Ctrl+C stops serving; stop before upgrading.
+`--model` names an upstream Hugging Face model: an MLX affine 4-bit, group-64
+repository such as `mlx-community/Qwen3.8-27B-4bit`, or a GGUF repository and
+variant, `OWNER/REPO:VARIANT`, such as `unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M`.
+Splash identifies the model from its own metadata and pairs the DFlash2 draft
+trained for it. The first serve sets up Python dependencies, downloads the
+model and its draft, and prepares the weights once
+([Weight preparation](#weight-preparation)); each start follows the model's
+revision ([Revisions](#revisions)). Legacy Splash packages remain loadable
+([Legacy Splash packages](#legacy-splash-packages)). Public repositories need
+no login; private or gated ones need `HF_TOKEN` or `hf auth login`. Ctrl+C
+stops serving; stop before upgrading.
 
 Use `--max-context 100K` or `--max-memory 28G` to set optional limits. Memory
 limits cap Metal allocations, not combined process RSS. Agents must already be
@@ -49,14 +55,16 @@ Timed-out uploads return 408 and release their input reservation.
 
 Source `install/completions/splash.bash` for Bash or
 `install/completions/_splash` for Zsh after `compinit`. Completion suggests
-commands, bundled official model IDs and installed models without network access.
+commands, the official model IDs (bundled, and as `splash serve` last refreshed
+them) and installed models, a GGUF's `OWNER/REPO:VARIANT` included, without
+network access.
 
 ## Server configuration
 
 The default listener is `127.0.0.1:8000`. To accept LAN connections:
 
 ```sh
-splash serve --model incoai/Qwen3.8-27B-Splash --host 0.0.0.0 --api-key YOUR_KEY
+splash serve --model mlx-community/Qwen3.8-27B-4bit --host 0.0.0.0 --api-key YOUR_KEY
 ```
 
 Connect to the server's LAN IP. `--host` selects the IPv4 bind address;
@@ -71,13 +79,13 @@ loopback, so use a listener that includes loopback when launching agents locally
 ## API model aliases
 
 Repeat `--served-model-name NAME` to accept additional API model IDs. The full
-`--model OWNER/REPO` still selects the package. `/v1/models` lists that ID first,
-followed by unique aliases; each alias's `root` identifies the loaded package.
-Generation and scoring responses always report the real package ID, even when
-requested through an alias. The model list and lookup support both names.
+`--model` ID still selects the model. `/v1/models` lists that ID first, followed
+by unique aliases; each alias's `root` identifies the loaded model. Generation
+and scoring responses always report the real model ID, even when requested
+through an alias. The model list and lookup support both names.
 
 ```sh
-splash serve --model incoai/Qwen3.8-27B-Splash --served-model-name local-qwen
+splash serve --model mlx-community/Qwen3.8-27B-4bit --served-model-name local-qwen
 ```
 
 Aliases cannot contain whitespace, control characters, `\`, `%`, `?`, `#`,
@@ -94,18 +102,85 @@ passed to the template using the same mapping as per-request values, not token
 budgets.
 
 ```sh
-splash serve --model incoai/Qwen3.8-27B-Splash --default-reasoning-effort none
+splash serve --model mlx-community/Qwen3.8-27B-4bit --default-reasoning-effort none
 ```
 
 `/apply-template` uses the same default. Anthropic `thinking` keeps its protocol
 semantics (off when omitted); judgment endpoints always disable thinking.
 
-## Model cache
+## Upstream model loading
+
+`install/upstream.py` installs a model from its upstream repository: it
+inspects the target, pairs the draft trained for it and decides when to follow
+the Hub. The result is an assembly, a local directory of links to the sources'
+Hub snapshots, published atomically. The other installer modules each own one
+part: `hub.py` the sources, the Hub cache and its pins; `assembly.py` the
+assembly layout, its build, verification and garbage collection, and the
+metadata derived from a GGUF; `families.py` the registry; `legacy.py` Splash
+packages; and `models.py` model IDs, selections, the installation lock and the
+command line (`install/models.py --model ID prepare|verify`). The assembly's
+`model.json` records the resolved sources and selected formats. The native
+loader reads it, and `splash serve`, `test-http-real` and the HTTP regression
+benchmark hold it while they run, so a concurrent installation cannot collect
+the assembly they serve. It is local installation metadata, not a file model
+publishers supply.
+
+A target is identified by its own metadata: an MLX config's `text_config`, or
+the one `gguf.model_config` derives from the selected GGUF's header, read with a
+few HTTP range requests before any weight download. The registry
+(`families.FAMILIES`) states each supported architecture's signature and the
+draft trained for it; repository names and model-card `base_model` fields play
+no part. An MLX target must declare affine 4-bit, group-64 `quantization` in
+`config.json`. Native source adapters validate model geometry, quantization,
+tensor shapes and draft compatibility again before execution. Remote Python
+code is not loaded.
+
+```bash
+splash serve --model mlx-community/Qwen3.6-35B-A3B-4bit
+splash serve --model unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M
+```
+
+A model ID with `--revision` or `--draft-model` is a separate installation
+from the same ID without them.
+
+### Revisions
+
+Installation resolves each source's revision to a commit once, downloads by
+that commit and records it in `model.json`, so a repository update cannot mix
+files from different revisions. It pins those snapshots in the Hub cache
+(`refs/splash/<installation>/<commit>`), so pruning the cache cannot remove files
+an installed model links.
+
+Every start resolves the target's revision (the default branch, or
+`--revision`) with one Hub request of at most 5 seconds (`hub.HUB_TIMEOUT`);
+`hub.Repository.resolve` alone decides whether the Hub is asked:
+
+- The installed commit: the assembly's links, sizes and times are checked and
+  it starts. It is re-assembled first when this release pins another draft for
+  the family or changed the GGUF metadata adapter; if that draft cannot be
+  fetched, the installed one is kept.
+- A new commit: only changed files are downloaded, and the new assembly
+  replaces the installed one atomically once published.
+- No answer, or a new commit that cannot be installed: the installed model
+  starts, with one line naming the Hub's reason or, on stderr, the
+  installation attempt that failed.
+- A 40-hex `--revision` never moves and `HF_HUB_OFFLINE=1` forbids the Hub:
+  both start a verified installation without a request.
+
+There is no update flag; to stay on one commit, pass it as `--revision`. A
+missing assembly, or one that no longer verifies, is built again. Without the
+Hub it is built from a cached snapshot, of the commit the `--revision` names,
+or else the one the installation recorded or pinned, or one the Hub cache
+records for the branch, never of another revision. Only files downloaded before
+are available, which is enough to rebuild a damaged or deleted assembly. The
+installer never rewrites upstream files.
+
+### Model cache
 
 To download new models to another disk, set the cache location before serving:
 
 ```sh
-HF_HUB_CACHE=/Volumes/Models/huggingface splash serve --model incoai/Qwen3.8-27B-Splash
+HF_HUB_CACHE=/Volumes/Models/huggingface splash serve --model mlx-community/Qwen3.8-27B-4bit
 ```
 
 `HF_HUB_CACHE` selects the Hugging Face download cache. Alternatively, set
@@ -114,23 +189,60 @@ HF_HUB_CACHE=/Volumes/Models/huggingface splash serve --model incoai/Qwen3.8-27B
 existing downloads are not moved. Prepared weights have their own cache,
 which this does not move ([Weight preparation](#weight-preparation)).
 
-## Model packages
+### Draft assets
 
-Packages contain `manifest.json`, packed `target/`, `draft/`, `vision/` weights
-and `tokenizer/`. The manifest lists artifact paths, sizes and SHA-256 hashes.
-Dense packages use schema 3 / `splash-packed-q4`; MoE uses schema 4 /
-`splash-packed-q4-moe`.
+Splash's DFlash2 drafts share one Hub repository, `families.DRAFTS`, with a
+folder per base model named after it: `Qwen3.8-27B/` and `Qwen3.6-35B-A3B/`.
+Each folder holds `config.json`, `model.bin` and `layer-N.bin`. The
+configuration is the original DFlash2 configuration with
+`splash.format = "MDFD0004"` and `splash.source`, the DFlash2 checkpoint the
+weights came from; native loading validates it against the target. The weights
+are the verified Q4 drafts of the Splash packages, not a quantization made at
+startup. Each family pins the commit that published its folder
+(`Draft.revision` in `families.FAMILIES`), and installation downloads only that
+folder.
 
-These formats encode Qwen3.8-27B and Qwen3.6-35B-A3B layouts. Compatible community
-fine-tunes may use any nonempty manifest model name. Native loading validates
-geometry, tensor sizes, binary headers, tokenizer and target/draft compatibility.
-New architectures require engine support; ordinary HF weights need conversion.
+To prepare a folder from a verified existing package:
+
+```bash
+python dev/tools/export_draft.py PACKAGE ORIGINAL_DRAFT_CONFIG DRAFTS/Qwen3.6-35B-A3B
+```
+
+The exporter verifies existing artifact hashes and copies only draft files.
+`--draft-model` accepts such a folder, a local copy of the whole repository, or
+another Hub repository with the same layout.
+
+### Tokenizer and chat templates
+
+An MLX target's configuration, tokenizer files and chat template come from its
+resolved snapshot. For GGUF, `install/gguf.py` reads the selected file's
+metadata without mapping or decoding weight tensors. Vocabulary IDs, BPE merge
+ranks, control/user-defined token types, BOS/EOS/padding IDs and template text
+come from that file; the supported `gpt2/qwen35` profile supplies the NFC and
+byte-level pre-tokenization algorithms. Unknown profiles, malformed metadata
+and automatic BOS/EOS insertion are rejected, with no cross-repository
+fallback; GGUF sidecar tokenizer/config files do not override embedded metadata.
+Model geometry is translated from the same metadata, subtracting any declared
+MTP layers from the layer count. Only the header is read before the download.
+The tokenizer and configuration are derived from the downloaded file once and
+cached under `models/.metadata`, keyed by the size and digest of each source
+GGUF, the SHA-256 of `gguf.py` and the `tokenizers` version; publication is
+atomic and entries are hash-checked on use.
 
 ### Vision
 
-An MLX model's `vision_tower.*` tensors and a GGUF `mmproj` projector both
-prepare the packed `vision/model.bin` layout, which the one BF16 vision
-operator reads: BF16 tensors are copied, and F32 or F16 tensors are
+Vision comes from the target repository: MLX's `vision_tower.*` tensors,
+linking only `config.json` and the shards holding them, or the GGUF
+repository's root `mmproj*.gguf` projector, chosen by its header: a `clip`
+projector whose weights are BF16, or F32; BF16 is preferred. F16 has a narrower
+exponent than BF16, so an F16 projector has already rounded small weights and
+is not used. The processor configuration (MLX `preprocessor_config.json`, the
+GGUF's `clip.vision` metadata) must describe the one preprocessing Splash
+implements (`server/images.py`); it is checked before any weight download and
+not installed.
+
+Both sources prepare the packed `vision/model.bin` layout, which the one BF16
+vision operator reads: BF16 tensors are copied, and F32 or F16 tensors are
 converted under the exact-BF16 rule of [weight preparation](#weight-preparation).
 Unsloth's mmproj stores its 1-D tensors, patch embedding and position table as
 F32, all of them BF16-exact, and prepares byte-identical to the packed file.
@@ -251,8 +363,14 @@ affine draft's) and reserves the vocabulary head only for decode.
 
 ### GGUF targets
 
-The native loader requires every tensor it reads to have a type it accepts for
-that tensor and lists every unsupported tensor in one error:
+`--model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M` selects the repository's
+root-level GGUF for that variant: the file named with the model name its GGUFs
+share, then `-UD-Q4_K_M`, or else the only one whose name ends in `-UD-Q4_K_M`
+(`upstream.select_gguf`). Before any weight download, its header must list
+every tensor the loader reads with a type it accepts for that tensor
+(`gguf.loaded_tensors`, checked by `gguf.require_loadable`; a test holds its
+quantized types to `runtime/metal/abi/QuantFormat.h`). The native loader checks again
+and lists every unsupported tensor in one error:
 
 - linears and experts: Q4_K, Q5_K, Q6_K, Q3_K, IQ4_XS, IQ4_NL, Q8_0 or IQ3_S;
 - token embeddings: Q4_K, Q6_K or Q8_0;
@@ -343,6 +461,22 @@ projection (up to three fused formats and widths, then `K` and an optional epilo
 decode tiles at one to four lanes and every K split, and marks the device policy's pick;
 `make benchmark-gguf-moe` times one MoE layer at the 35B shape, GGUF against affine Q4, on the
 device's plans and the other GGUF tile.
+
+## Legacy Splash packages
+
+Splash packages, such as `incoai/Qwen3.8-27B-Splash`, are the prebuilt format
+that predates upstream loading, and `--model` still accepts them. They contain
+`manifest.json`, packed `target/`, `draft/` and `vision/` weights and
+`tokenizer/`; the manifest lists artifact paths, sizes and SHA-256 hashes.
+Qwen3.8-27B packages use schema 3 / `splash-packed-q4`, Qwen3.6-35B-A3B
+packages schema 4 / `splash-packed-q4-moe`. Compatible community fine-tunes may
+use any nonempty manifest model name. Native loading validates geometry, tensor
+sizes, binary headers, tokenizer and target/draft compatibility, and maps the
+packed files without preparation. `install/legacy.py` installs a package as a
+selection link to its verified Hub snapshot, pinned like an assembly's
+sources. An installed package starts without a Hub request. A package has no
+variants, so a `:VARIANT` suffix is rejected, and `--revision` and
+`--draft-model` require an upstream model ID.
 
 ## Code and API boundaries
 
@@ -478,7 +612,7 @@ from typesafe_sdk import Choice, Noul, Score, TypeSafeClient
 with TypeSafeClient(
     base_url="http://127.0.0.1:8000",
     api_key="local",  # Use SPLASH_API_KEY's value if server authentication is on.
-    model="incoai/Qwen3.8-27B-Splash",
+    model="mlx-community/Qwen3.8-27B-4bit",
 ) as client:
     result = client.system_one(
         state={"message": "I was charged twice. Please fix this today."},
@@ -542,7 +676,7 @@ Prompts that exceed the context limit are rejected, not truncated.
 
 System One validation uses 422 `detail` arrays; successful responses contain
 `model`, `answers`, and `usage`, plus an `x-typesafe-request-id` header. SDK model
-discovery reports an empty `release_date` because packages do not record one.
+discovery reports an empty `release_date` because Splash records none for a model.
 The official SDK is a client only, not a server dependency. API compatibility does
 not imply Jev weights, accuracy, proprietary confidence semantics or calibration.
 
@@ -571,25 +705,50 @@ broken engine invariants stay fatal and still mark the runtime unhealthy.
 
 ```sh
 make check
-make install test-real test-http-real MODEL=incoai/Qwen3.8-27B-Splash
+make install test-real test-http-real MODEL=mlx-community/Qwen3.8-27B-4bit
 ```
 
 `make check` needs no model weights. `make check-native-cpu` builds production
 and runs native CPU tests without a GPU; `make check-native-metal` requires a
 supported Metal device and runs the kernel tests under shader validation. They
 include the preparation of small synthetic MLX, GGUF and vision sources and the
-GGUF kernels on synthetic tensors. Hosted CI runs CPU checks and sanitizers;
-the hardware release gate runs the full suite.
+GGUF kernels on synthetic tensors. Hosted CI runs CPU checks and sanitizers.
 
-Repeat model tests with `MODEL=incoai/Qwen3.6-35B-A3B-Splash`.
-Before release, install all four agents and run `make release-check MODEL=...`
-for both models from a clean checkout. It includes correctness, sanitizers,
-real HTTP/client behavior and performance checks.
+The real-model targets take `MODEL` exactly as `splash serve --model` does and
+run the installation `make install MODEL=...` prepared in this checkout's
+`install/models`:
+
+| Target | Runs |
+| --- | --- |
+| `test-real` | vision parity with the family's fixture in `dev/tests/fixtures/vision-parity/`, and the native model runtime oracle |
+| `test-http-real` | the HTTP frontend on an isolated server (`dev/tests/smoke_real.py`) |
+| `test-agent-real` | the four official clients through `splash serve` (`dev/tests/agent_real.py`) |
+| `test-release-real` | the HTTP smoke and all four clients on one `splash serve` |
+| `test-performance-real` | the native prefill, decode and batch benchmark |
+| `release-check` | `check`, `verify-models`, sanitizers, `test-real`, `test-release-real`, `test-performance-real` |
+
+`benchmark-backend`, `benchmark-decode-profile` and `tune-kernels` take `MODEL`
+the same way. The models they are run with, one per family and source format:
+
+| Family | MLX | GGUF | Splash package |
+| --- | --- | --- | --- |
+| Qwen3.8-27B | `mlx-community/Qwen3.8-27B-4bit` | `unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M` | `incoai/Qwen3.8-27B-Splash` |
+| Qwen3.6-35B-A3B | `mlx-community/Qwen3.6-35B-A3B-4bit` | `unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M` | `incoai/Qwen3.6-35B-A3B-Splash` |
+
+The source formats load differently: an MLX target is prepared into the packed
+layout, a GGUF target into its own layout for the GGUF projection and MoE
+kernels, and a package's packed files are mapped as they are. Before release,
+install all four agents and run `make release-check MODEL=...` for each model
+from a clean checkout. It includes correctness, sanitizers, real HTTP/client
+behavior and performance characterization. The hardware release gate
+(`release-hardware` in `.github/workflows/ci.yml`) runs it on self-hosted Macs
+for the two Splash packages only, so its real-model part exercises neither the
+preparation of a real MLX model nor a GGUF model.
 
 `make test-engine-cpu` builds the affine source oracle so it cannot break
 unnoticed, but no target runs it because it needs real models: after
 `make all build/engine-tests/affine-source-oracle`, pass it
-`build/splash.metallib`, an MLX model's Hub snapshot directory and the
+`build/splash.metallib`, an installed MLX model's `target` directory and the
 matching installed package to compare every prepared byte.
 
 Compare performance on the same idle Mac with the same model and workload.
@@ -605,29 +764,31 @@ and experiment notes out of the source tree and commits.
 
 ### Local benchmarks
 
-From a source checkout with the model installed, use the existing native
-benchmark for prefill, decode and batch measurements:
+From a source checkout with the model installed, use the native benchmark for
+prefill, decode and batch measurements:
 
 ```sh
-make test-performance-real MODEL=incoai/Qwen3.8-27B-Splash
+make test-performance-real MODEL=mlx-community/Qwen3.8-27B-4bit
 ```
 
-It writes `build/release/backend-benchmark.json`. Repeat with the 35B package
-for that model. This characterizes one build; it is not a comparison with
-another engine or a test of agent task quality.
+It writes `build/release/backend-benchmark.json`; repeat it for each model.
+This characterizes one build; it is not a comparison with another engine or a
+test of agent task quality.
 
 For a same-machine HTTP regression check, retain the previous `splash` binary
 **and its adjacent `splash.metallib`**, then run from the candidate checkout:
 
 ```sh
 .venv/bin/python -m dev.benchmarks.http_regression \
-  --model incoai/Qwen3.8-27B-Splash \
+  --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M \
   --baseline-binary /path/to/baseline/build/splash \
   --contexts 2048,10000 --samples 5
 ```
 
-This starts isolated servers in alternating order, compares matched cold,
-exact-prefix and decode requests, and saves `build/release/http-regression.json`.
+It takes any installed model and, for an upstream one, holds its assembly for
+the whole run, so every round serves the same model. It starts isolated servers
+in alternating order, compares matched cold, exact-prefix and decode requests,
+and saves `build/release/http-regression.json`.
 It does not contact your running server. Use the same power mode and charger,
 stop other GPU workloads, and report chip/GPU cores, memory, Splash version,
 model revision, actual input/output token counts, and cache hits with results.
