@@ -20,7 +20,8 @@ from unittest import mock
 from openai import OpenAI
 from tokenizers import Tokenizer, decoders, models
 
-from server import api_shapes, diagnostics, judgments, tool_schema
+from dev.tests.engine.test_documents import pdf_bytes
+from server import api_shapes, diagnostics, documents, judgments, tool_schema
 from server import backend as backend_api
 from server import constraints as generation_constraints
 from server import errors as api_errors
@@ -586,6 +587,7 @@ class Harness:
         max_request_bytes=api.DEFAULT_MAX_REQUEST_BYTES,
         host="127.0.0.1",
         allowed_hosts=(),
+        vision=True,
         **frontend_options,
     ):
         self.tokenizer = tokenizer or FakeTokenizer()
@@ -603,6 +605,7 @@ class Harness:
             2,
             constraint_factory=constraint_factory,
             thinking_codec=thinking_codec,
+            vision=vision,
             **frontend_options,
         )
         self.server = api.FrontendServer(
@@ -1405,7 +1408,7 @@ class ServerTest(unittest.TestCase):
     def test_judgment_deadline_stops_the_slot_boundary_pass(self):
         clock = [100.0]
         tokenizer = self.BoundaryCountingTokenizer(clock, 0.5)
-        app = make_frontend(tokenizer, None, "test-model", 8192, 16, 10, 2)
+        app = make_frontend(tokenizer, None, "test-model", 8192, 16, 10, 2, vision=True)
         body = self.judgment_body(
             options=[
                 {"id": f"opt{index}", "description": f"case {index}"}
@@ -1426,7 +1429,7 @@ class ServerTest(unittest.TestCase):
 
     def test_judgment_context_budget_precedes_the_slot_boundary_pass(self):
         tokenizer = self.BoundaryCountingTokenizer()
-        app = make_frontend(tokenizer, None, "test-model", 8, 16, 10, 2)
+        app = make_frontend(tokenizer, None, "test-model", 8, 16, 10, 2, vision=True)
         with self.assertRaises(api.APIError) as error:
             app.prepare_judgment(
                 self.judgment_body(
@@ -1852,6 +1855,223 @@ class ServerTest(unittest.TestCase):
         pad = app.tokenizer.convert_tokens_to_ids(api_shapes.IMAGE_PAD_TOKEN)
         with self.assertRaisesRegex(api.APIError, "request size limit"):
             app._expand_image_pads([pad], [image], [0])
+
+    def test_language_only_rejects_media_before_decoding_or_rendering(self):
+        runtime = FakeRuntime()
+        harness = self.harness(
+            runtime, tokenizer=self.ImagePadTokenizer(), max_context=65536, vision=False
+        )
+        image = self._png_data_url()
+        pdf = base64.b64encode(pdf_bytes()).decode()
+        pdf_url = "data:application/pdf;base64," + pdf
+        chat = {
+            "image_url": {"type": "image_url", "image_url": {"url": image}},
+            "file": {
+                "type": "file",
+                "file": {"filename": "a.pdf", "file_data": pdf_url},
+            },
+        }
+        responses = {
+            "input_image": {"type": "input_image", "image_url": image},
+            "input_file": {
+                "type": "input_file",
+                "filename": "a.pdf",
+                "file_data": pdf_url,
+            },
+        }
+        anthropic = {
+            "image": {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": image.partition(",")[2],
+                },
+            },
+            "document": {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": pdf,
+                },
+            },
+        }
+        call = {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "look", "arguments": "{}"},
+        }
+        modality = {
+            "image_url": "image",
+            "input_image": "image",
+            "image": "image",
+            "file": "PDF",
+            "input_file": "PDF",
+            "document": "PDF",
+        }
+        # Every API, with each part in a user turn and in a tool result.
+        cases = []
+        for kind, part in chat.items():
+            tool_result = [
+                {"role": "user", "content": "look"},
+                {"role": "assistant", "content": "", "tool_calls": [call]},
+                {"role": "tool", "tool_call_id": "call_1", "content": [part]},
+            ]
+            for path in ("/v1/chat/completions", "/apply-template"):
+                for messages in ([{"role": "user", "content": [part]}], tool_result):
+                    cases.append((path, kind, self.body(messages=messages)))
+        for kind, part in responses.items():
+            tool_result = [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "look",
+                    "arguments": "{}",
+                },
+                {"type": "function_call_output", "call_id": "call_1", "output": [part]},
+            ]
+            for items in ([{"role": "user", "content": [part]}], tool_result):
+                cases.append(("/v1/responses", kind, self.responses_body(input=items)))
+            # Stored history is normalized with the new input, like any item.
+            history_id = f"resp_{kind}"
+            harness.app.response_store.put(
+                {"id": history_id}, [{"role": "user", "content": [part]}]
+            )
+            cases.append(
+                (
+                    "/v1/responses",
+                    kind,
+                    self.responses_body(input="again", previous_response_id=history_id),
+                )
+            )
+        for kind, block in anthropic.items():
+            tool_result = [
+                {"role": "user", "content": "look"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_1",
+                            "name": "look",
+                            "input": {},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "content": [block],
+                        }
+                    ],
+                },
+            ]
+            for path in ("/v1/messages", "/v1/messages/count_tokens"):
+                for messages in ([{"role": "user", "content": [block]}], tool_result):
+                    cases.append((path, kind, self.anthropic_body(messages=messages)))
+        with (
+            mock.patch.object(
+                api.image_input,
+                "decode_data_url",
+                wraps=api.image_input.decode_data_url,
+            ) as decode,
+            mock.patch.object(
+                documents, "pdf_content", wraps=documents.pdf_content
+            ) as render,
+        ):
+            for path, kind, body in cases:
+                with self.subTest(path=path, kind=kind):
+                    status, _, payload = harness.request("POST", path, body)
+                    self.assertEqual(status, 400, payload)
+                    self.assertEqual(
+                        json.loads(payload)["error"]["message"],
+                        f"{modality[kind]} input is not supported: "
+                        "this model is serving without vision "
+                        "(started with --language-only)",
+                    )
+            decode.assert_not_called()
+            render.assert_not_called()
+        self.assertEqual(runtime.requests, [])
+        self.assertEqual(harness.app.images.stats()["request_bytes"], 0)
+        self._wait_for_http_active(harness.server.request_bodies, 0)
+        status, _, payload = harness.request(
+            "POST", "/v1/chat/completions", self.body()
+        )
+        self.assertEqual(status, 200, payload)
+
+    def test_conversions_leave_media_to_message_normalization(self):
+        from dev.tests.engine.test_documents import document_block
+
+        image = self._png_data_url()
+        document = document_block(title="Report", context="Fixture")
+        anthropic = api_shapes.anthropic_to_chat_prompt
+        responses = api_shapes.responses_to_chat_body
+        with (
+            mock.patch.object(
+                api.image_input, "decode_data_url", side_effect=AssertionError
+            ),
+            mock.patch.object(documents, "_render", side_effect=AssertionError),
+        ):
+            converted = {
+                "responses": responses(
+                    {
+                        "input": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "input_image", "image_url": image},
+                                    {"type": "input_file", "file_data": image},
+                                ],
+                            }
+                        ]
+                    }
+                )["messages"],
+                "anthropic": anthropic(
+                    {
+                        "model": "m",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": "image/png",
+                                            "data": image.partition(",")[2],
+                                        },
+                                    },
+                                    document,
+                                ],
+                            }
+                        ],
+                    },
+                    thinking_resolver=no_signed_thinking,
+                )["messages"],
+            }
+        for shape, messages in converted.items():
+            with self.subTest(shape=shape):
+                kinds = [part["type"] for part in messages[0]["content"]]
+                self.assertEqual(kinds[0], "image_url")
+                self.assertEqual(kinds[-1], "file")
+                with self.assertRaisesRegex(api.APIError, "^image input"):
+                    api_shapes.normalize_messages(messages, vision=False)
+                with self.assertRaisesRegex(api.APIError, "^PDF input"):
+                    api_shapes.normalize_messages(
+                        [{"role": "user", "content": messages[0]["content"][1:]}],
+                        vision=False,
+                    )
+        # Normalization renders an Anthropic document as the block would.
+        self.assertEqual(
+            api_shapes.normalize_messages(converted["anthropic"], vision=True)[0][
+                "content"
+            ][1:],
+            documents.document_content(document),
+        )
 
     def test_image_count_is_checked_before_decoding(self):
         app = self.harness(FakeRuntime(), tokenizer=self.ImagePadTokenizer()).app
@@ -3106,9 +3326,13 @@ class ServerTest(unittest.TestCase):
         tokenizer = FakeTokenizer()
         backend = backend_api.NativeBackend(FakeRuntime(), tokenizer)
         self.addCleanup(backend.close)
-        app = make_frontend(tokenizer, backend, "test-model", 40000, 32768, 1, 2)
+        app = make_frontend(
+            tokenizer, backend, "test-model", 40000, 32768, 1, 2, vision=True
+        )
         self.assertEqual(app.prepare(self.body())[0].max_new_tokens, 32768)
-        app = make_frontend(tokenizer, backend, "test-model", 10, 32768, 1, 2)
+        app = make_frontend(
+            tokenizer, backend, "test-model", 10, 32768, 1, 2, vision=True
+        )
         self.assertEqual(app.prepare(self.body())[0].max_new_tokens, 8)
         with mock.patch("sys.stderr"):
             for option, value in (
@@ -3137,9 +3361,11 @@ class ServerTest(unittest.TestCase):
         with mock.patch.object(
             api.secrets, "token_hex", side_effect=("boot_a", "boot_b")
         ):
-            first = make_frontend(tokenizer, first_backend, "test-model", 128, 16, 1, 2)
+            first = make_frontend(
+                tokenizer, first_backend, "test-model", 128, 16, 1, 2, vision=True
+            )
             second = make_frontend(
-                tokenizer, second_backend, "test-model", 128, 16, 1, 2
+                tokenizer, second_backend, "test-model", 128, 16, 1, 2, vision=True
             )
         first_job, _, _ = first.prepare(self.body(seed=1))
         second_job, _, _ = second.prepare(self.body(seed=1))
@@ -3253,6 +3479,57 @@ class ServerTest(unittest.TestCase):
         server.server_bind.assert_called_once_with()
         server.server_activate.assert_called_once_with()
         self.assertEqual(order, ["bind", "runtime"])
+
+    def test_main_takes_vision_from_the_ready_event(self):
+        args = main_args()
+        features = int(
+            native_wire.ReadyFeature.CANCELLATION
+            | native_wire.ReadyFeature.TOKEN_MASKS
+            | native_wire.ReadyFeature.STATUS_JSON
+            | native_wire.ReadyFeature.MULTIPLEXING
+        )
+        for vision in (True, False):
+            with self.subTest(vision=vision):
+                runtime = mock.Mock()
+                runtime.readiness = native_wire.ReadyEvent(
+                    1,
+                    4,
+                    131072,
+                    features | (native_wire.ReadyFeature.VISION if vision else 0),
+                )
+                with (
+                    mock.patch.object(api, "parse_args", return_value=args),
+                    mock.patch.object(api, "load_thinking_key", return_value=None),
+                    mock.patch.object(
+                        api.AutoTokenizer, "from_pretrained", return_value=object()
+                    ),
+                    mock.patch.object(api, "validate_tokenizer"),
+                    mock.patch.object(
+                        api.engine_runtime,
+                        "MultiplexedRuntime",
+                        return_value=runtime,
+                    ),
+                    mock.patch.object(api, "NativeBackend"),
+                    mock.patch.object(api, "ConstraintFactory"),
+                    mock.patch.object(api, "Frontend") as app_type,
+                    mock.patch.object(
+                        api,
+                        "FrontendServer",
+                        return_value=mock.Mock(server_port=8000),
+                    ),
+                    mock.patch.object(api.signal, "signal"),
+                    mock.patch.object(api, "print_status") as status,
+                ):
+                    api.main()
+                self.assertIs(app_type.call_args.kwargs["vision"], vision)
+                self.assertIn(
+                    mock.call(
+                        "Ready · test-model · context 128K"
+                        + ("" if vision else " · language only")
+                        + " · http://127.0.0.1:8000"
+                    ),
+                    status.call_args_list,
+                )
 
     def test_main_cleans_up_when_native_startup_fails_after_reserved_bind(self):
         args = main_args(max_context=128, max_memory=32 * 1024**3)
@@ -4696,7 +4973,9 @@ class ServerTest(unittest.TestCase):
         tokenizer = FakeTokenizer()
         backend = backend_api.NativeBackend(FakeRuntime(), tokenizer)
         self.addCleanup(backend.close)
-        app = make_frontend(tokenizer, backend, "test-model", 128, 16, 1, 2)
+        app = make_frontend(
+            tokenizer, backend, "test-model", 128, 16, 1, 2, vision=True
+        )
         tools = [
             {"type": "function", "function": {"name": "f"}},
             {"type": "function", "function": {"name": "g"}},
@@ -5065,7 +5344,9 @@ class ServerTest(unittest.TestCase):
         tokenizer = FakeTokenizer()
         backend = backend_api.NativeBackend(FakeRuntime(), tokenizer)
         self.addCleanup(backend.close)
-        app = make_frontend(tokenizer, backend, "test-model", 128, 16, 1, 2)
+        app = make_frontend(
+            tokenizer, backend, "test-model", 128, 16, 1, 2, vision=True
+        )
         for effort in ("xhigh", "medium", "low"):
             app.prepare(self.body(reasoning_effort=effort))
             template = tokenizer.templates[-1][1]
@@ -5145,7 +5426,15 @@ class ServerTest(unittest.TestCase):
         )
         factory = FakeConstraintFactory()
         app = make_frontend(
-            tokenizer, None, "test-model", 128, 16, 1, 2, constraint_factory=factory
+            tokenizer,
+            None,
+            "test-model",
+            128,
+            16,
+            1,
+            2,
+            constraint_factory=factory,
+            vision=True,
         )
         for tools, expected in (([], False), ([self.rich_weather_tool()], True)):
             body = self.body(tools=tools)
@@ -5193,7 +5482,9 @@ class ServerTest(unittest.TestCase):
             ),
         ):
             tokenizer = TemplateTokenizer(self.reasoning_template(efforts=accepted))
-            app = make_frontend(tokenizer, None, "test-model", 128, 16, 1, 2)
+            app = make_frontend(
+                tokenizer, None, "test-model", 128, 16, 1, 2, vision=True
+            )
             for effort in ("minimal", "low", "medium", "high", "xhigh", "max"):
                 with self.subTest(accepted=accepted, effort=effort):
                     tokenizer.templates.clear()
@@ -5210,7 +5501,7 @@ class ServerTest(unittest.TestCase):
 
     def test_reasoning_template_errors_do_not_silently_drop_effort(self):
         tokenizer = TemplateTokenizer(self.reasoning_template(efforts=("medium",)))
-        app = make_frontend(tokenizer, None, "test-model", 128, 16, 1, 2)
+        app = make_frontend(tokenizer, None, "test-model", 128, 16, 1, 2, vision=True)
         with self.assertRaises(api.APIError):
             app.prepare(self.body(reasoning_effort="high"))
         self.assertEqual(
@@ -5227,7 +5518,7 @@ class ServerTest(unittest.TestCase):
 
     def test_reasoning_effort_accepts_only_standard_protocol_values(self):
         tokenizer = FakeTokenizer()
-        app = make_frontend(tokenizer, None, "test-model", 128, 16, 1, 2)
+        app = make_frontend(tokenizer, None, "test-model", 128, 16, 1, 2, vision=True)
         for effort in ("", "on", "off", "ultra", True, 1, [], {}):
             with (
                 self.subTest(effort=effort),
@@ -5248,7 +5539,9 @@ class ServerTest(unittest.TestCase):
             tokenizer = TemplateTokenizer(
                 "{{ '<|im_start|>assistant\\n" + prefix + "' }}"
             )
-            app = make_frontend(tokenizer, None, "test-model", 128, 16, 1, 2)
+            app = make_frontend(
+                tokenizer, None, "test-model", 128, 16, 1, 2, vision=True
+            )
             with (
                 self.subTest(effort=effort),
                 self.assertRaisesRegex(api.APIError, "requested thinking mode"),
@@ -5278,7 +5571,7 @@ class ServerTest(unittest.TestCase):
 
     def test_anthropic_thinking_off_is_not_reenabled_by_effort(self):
         tokenizer = TemplateTokenizer(self.reasoning_template())
-        app = make_frontend(tokenizer, None, "test-model", 128, 16, 1, 2)
+        app = make_frontend(tokenizer, None, "test-model", 128, 16, 1, 2, vision=True)
         for thinking in (None, {"type": "disabled"}):
             body = self.anthropic_body(output_config={"effort": "high"})
             if thinking is not None:
@@ -5735,6 +6028,7 @@ class ServerTest(unittest.TestCase):
             16,
             2.0,
             2,
+            vision=True,
         )
         results = []
         errors = []
@@ -5779,6 +6073,7 @@ class ServerTest(unittest.TestCase):
                 16,
                 1,
                 0,
+                vision=True,
             )
 
     def test_context_window_rejects_output_budget_without_truncating(self):
@@ -5852,7 +6147,9 @@ class ServerTest(unittest.TestCase):
             self.assertEqual(caught.exception.code, "context_length_exceeded")
 
     def test_preparation_consumes_original_deadline_and_releases_slots(self):
-        app = make_frontend(FakeTokenizer(), None, "test-model", 128, 16, 10, 1)
+        app = make_frontend(
+            FakeTokenizer(), None, "test-model", 128, 16, 10, 1, vision=True
+        )
         for elapsed in (0.25, 5):
             clock = [100.0]
 
@@ -5884,7 +6181,9 @@ class ServerTest(unittest.TestCase):
                 app.preparation_slots.release()
 
     def test_preparation_queue_respects_request_timeout(self):
-        app = make_frontend(FakeTokenizer(), None, "test-model", 128, 16, 10, 1)
+        app = make_frontend(
+            FakeTokenizer(), None, "test-model", 128, 16, 10, 1, vision=True
+        )
         app.preparation_slots.acquire()
         try:
             with self.assertRaises(api.APIError) as error:
@@ -5898,7 +6197,9 @@ class ServerTest(unittest.TestCase):
             app.preparation_slots.release()
 
     def test_expired_preparation_skips_later_stages(self):
-        app = make_frontend(FakeTokenizer(), None, "test-model", 128, 16, 10, 1)
+        app = make_frontend(
+            FakeTokenizer(), None, "test-model", 128, 16, 10, 1, vision=True
+        )
         for stage in ("grammar", "images"):
             clock = [100.0]
 
@@ -6324,7 +6625,9 @@ class ServerTest(unittest.TestCase):
         tokenizer = FakeTokenizer()
         backend = backend_api.NativeBackend(FakeRuntime(), tokenizer)
         self.addCleanup(backend.close)
-        app = make_frontend(tokenizer, backend, "test-model", 128, 16, 1, 2)
+        app = make_frontend(
+            tokenizer, backend, "test-model", 128, 16, 1, 2, vision=True
+        )
         body = self.body()
         body.pop("temperature")
         with mock.patch("server.frontend.secrets.randbits", return_value=123):
@@ -7990,7 +8293,8 @@ class MessageNormalizationTest(unittest.TestCase):
                 },
                 {"role": "tool", "tool_call_id": "call_1", "content": "interrupted"},
                 {"role": "user", "content": "continue"},
-            ]
+            ],
+            vision=True,
         )
         call = messages[1]["tool_calls"][0]["function"]
         self.assertEqual(call["name"], "shell")
@@ -8008,7 +8312,8 @@ class MessageNormalizationTest(unittest.TestCase):
                         }
                     ],
                 },
-            ]
+            ],
+            vision=True,
         )
         self.assertEqual(
             complete[1]["tool_calls"][0]["function"]["arguments"], {"a": 1}
@@ -8031,7 +8336,8 @@ class MessageNormalizationTest(unittest.TestCase):
                                 }
                             ],
                         },
-                    ]
+                    ],
+                    vision=True,
                 )
         with self.assertRaises(api.APIError):
             api_shapes.normalize_messages(
@@ -8047,7 +8353,8 @@ class MessageNormalizationTest(unittest.TestCase):
                             }
                         ],
                     },
-                ]
+                ],
+                vision=True,
             )
 
 

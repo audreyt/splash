@@ -221,12 +221,16 @@ class Frontend:
         *,
         constraint_factory,
         thinking_codec,
+        vision,
         max_image_pixels=image_input.MAX_PIXELS,
         served_model_names=(),
         default_reasoning_effort=None,
     ):
         if not isinstance(preparation_capacity, int) or preparation_capacity <= 0:
             raise ValueError("frontend preparation capacity must be positive")
+        # Announced by the engine in its Ready event. Without it, message
+        # normalization rejects image and PDF input before any decoding.
+        self.vision = vision
         self.latencies = LatencyMetrics()
         self.tokenizer = tokenizer
         self.prompt_tokenizer = PromptTokenizer(tokenizer)
@@ -694,7 +698,9 @@ class Frontend:
         if preserve_thinking is not None and not isinstance(preserve_thinking, bool):
             raise APIError(400, "preserve_thinking must be a boolean")
         messages = template_messages(
-            normalize_messages(body.get("messages"), deadline=deadline)
+            normalize_messages(
+                body.get("messages"), vision=self.vision, deadline=deadline
+            )
         )
         tools, tool_policy = normalize_tools(
             body.get("tools"),
