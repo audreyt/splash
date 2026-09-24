@@ -624,6 +624,19 @@ class ClientTests(unittest.TestCase):
                 self.assertEqual(configured.pop("model")["default"], MODEL)
                 self.assertEqual(configured, kept)
 
+    def test_failed_profile_replacement_keeps_the_previous_profile(self):
+        home = self.runtime / "hermes"
+        home.mkdir()
+        path = home / "config.yaml"
+        path.write_text("display: {interface: tui}\n")
+        with (
+            mock.patch.object(Path, "replace", side_effect=OSError("disk full")),
+            self.assertRaisesRegex(OSError, "disk full"),
+        ):
+            self.command("hermes")
+        self.assertEqual(path.read_text(), "display: {interface: tui}\n")
+        self.assertEqual(list(home.iterdir()), [path])
+
     def test_no_client_filters_tools_bypasses_permissions_or_changes_cwd(self):
         cwd = Path.cwd()
         original = {"PATH": "/bin", "USER_SETTING": "keep"}

@@ -342,12 +342,16 @@ def _write_hermes_profile(home, server):
         # compaction threshold; do not inherit a cloud model's output cap.
         max_tokens=server.response_tokens,
     )
-    # Replace only after the complete profile is ready; two launching shells
-    # never expose a partially written YAML file to Hermes.
-    with tempfile.NamedTemporaryFile(mode="w", dir=home, delete=False) as output:
+    _replace_file(path, yaml.safe_dump(profile, sort_keys=False))
+
+
+def _replace_file(path, text):
+    """Replace path only once text is complete: two launching shells never
+    expose a partially written configuration to the client."""
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as output:
         temporary = Path(output.name)
         try:
-            yaml.safe_dump(profile, output, sort_keys=False)
+            output.write(text)
             output.close()
             temporary.replace(path)
         finally:
