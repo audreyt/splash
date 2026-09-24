@@ -88,6 +88,10 @@ Vision comes from the same source: embedded vision tensors for MLX, or the
 repository's companion BF16 or F32 `mmproj` GGUF. Both are prepared as
 BF16; an F32 or F16 tensor loads only when every value is exactly a BF16, as in
 Unsloth's mmproj files.
+Use `--language-only` to skip vision loading and preparation. It also skips the
+GGUF mmproj download; MLX vision tensors share the language model's shards, so
+those shards still download in full. The server then rejects image and PDF input
+and reports `vision: false` in `/status` and `/v1/models`.
 
 The prepared weights live in `~/Library/Caches/Splash/weights`
 (`SPLASH_WEIGHT_CACHE` relocates them); preparation uses bounded temporary

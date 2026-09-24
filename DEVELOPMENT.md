@@ -138,10 +138,11 @@ code is not loaded.
 ```bash
 splash serve --model mlx-community/Qwen3.6-35B-A3B-4bit
 splash serve --model unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M
+splash serve --model mlx-community/Qwen3.8-27B-4bit --language-only
 ```
 
-A model ID with `--revision` or `--draft-model` is a separate installation
-from the same ID without them.
+A model ID with `--revision`, `--language-only` or `--draft-model` is a
+separate installation from the same ID without them.
 
 ### Revisions
 
@@ -248,6 +249,17 @@ Unsloth's mmproj stores its 1-D tensors, patch embedding and position table as
 F32, all of them BF16-exact, and prepares byte-identical to the packed file.
 Quantized MLX towers, deepstack projectors and mmproj tensors the tower does not
 use are rejected.
+
+`--language-only` links and loads no vision weights and removes them from
+memory accounting. It skips a GGUF's mmproj download; MLX vision tensors share
+shards with the language model, which download in full. The native Ready event
+announces vision only when the model loaded it. Without it, image and PDF input
+fails with a 400 naming the modality. Every API shape converts its media to
+image and file parts, and message normalization, the one place that accepts or
+rejects them, checks before any image is decoded or PDF rendered, in user
+turns, tool results and stored Responses history alike. `/status` and
+`/v1/models` report `vision: false` and `input_modalities: ["text"]`, and the
+launchers configure OpenCode and Hermes without attachments.
 
 ### Weight preparation
 
@@ -476,8 +488,8 @@ sizes, binary headers, tokenizer and target/draft compatibility, and maps the
 packed files without preparation. `install/legacy.py` installs a package as a
 selection link to its verified Hub snapshot, pinned like an assembly's
 sources. An installed package starts without a Hub request. A package has no
-variants, so a `:VARIANT` suffix is rejected, and `--revision` and
-`--draft-model` require an upstream model ID.
+variants, so a `:VARIANT` suffix is rejected, and `--revision`,
+`--language-only` and `--draft-model` require an upstream model ID.
 
 ## Code and API boundaries
 
@@ -545,6 +557,7 @@ Proxy consumers can use these fields; additional fields may be added:
 | `memory_actual.current_bytes`, `peak_bytes` | Metal allocations, not process RSS |
 | `metrics.decode_tokens_per_second` | Aggregate native decode throughput, not a request's end-to-end rate |
 | `maximum_context_tokens` | Declared context limit; available memory may limit admission |
+| `vision`, `input_modalities` | Whether image and PDF input is accepted; `false` and `["text"]` after `--language-only` |
 
 `GET /metrics` exposes the same counters in Prometheus text format. Both endpoints
 require the API key when authentication is enabled. Consumers should tolerate
