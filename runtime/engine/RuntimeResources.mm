@@ -165,18 +165,18 @@ canonicalRuntimeCacheNamespace(const RuntimeCacheIdentity &identity) {
   return sha256(canonical.str());
 }
 
+} // namespace
+
 void requireLoadedModel(const model::ModelPackage &package) {
   if (!package.targetActualAllocatedBytes() ||
       !package.draft.actualAllocatedBytes ||
-      !package.vision.actualAllocatedBytes ||
+      (package.descriptor.hasVision() && !package.vision.actualAllocatedBytes) ||
       package.manifestFingerprintSha256.empty() ||
       package.targetManifestFingerprint().empty()) {
     throw std::invalid_argument(
         "loaded model package has incomplete allocation accounting");
   }
 }
-
-} // namespace
 
 std::string_view runtimeResourceStageName(RuntimeResourceStage stage) {
   switch (stage) {

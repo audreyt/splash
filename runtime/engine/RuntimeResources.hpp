@@ -63,6 +63,10 @@ makeRuntimeCacheIdentity(std::string_view combinedManifestSha256,
                          std::string_view buildId,
                          kv::Layout targetKvLayout);
 
+// The memory plan counts each weight category from the loaded package, so
+// every category the model has must report its allocation and identity.
+void requireLoadedModel(const model::ModelPackage &package);
+
 struct RuntimeResourcesConfig {
   kv::Format kvFormat = kv::Format::Int8;
   std::filesystem::path metallibPath;
@@ -70,8 +74,9 @@ struct RuntimeResourcesConfig {
   model::ModelDescriptor model;
   std::string buildId;
   uint64_t maximumMemoryBytes = 0;
-  // Patches per image the vision scratch covers; the protocol limit and the
-  // engine's request validation use the same value.
+  // Patches per image the vision scratch covers. The engine admits images up
+  // to it when the model loaded vision and none otherwise; the wire parser's
+  // limit defaults to the same constant.
   uint32_t maximumImagePatches = ops::kMaximumImagePatches;
   // The process's existing pressure observer runs before resource assembly;
   // it only publishes a level. Bootstrap checks it at Metal operation

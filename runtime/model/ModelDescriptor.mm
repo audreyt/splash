@@ -380,18 +380,21 @@ ModelDescriptor inspectSourceModel(const std::filesystem::path &root) {
   requireEqual(requireString(storage, @"format", "draft storage format"), kDFlashLayerMagic, "draft storage format");
 
   const auto vision = requireString(record, @"vision_format", "vision format");
-  if (vision == "safetensors") result.visionSource = VisionSource::Mlx;
-  else if (vision == "gguf") result.visionSource = VisionSource::Gguf;
-  else throw std::invalid_argument("unsupported vision source format: " + vision);
-  NSDictionary *v = requireObject(config, @"vision_config", "vision config");
-  const auto &l = result.vision;
-  requireNumbers(v, {{"depth", l.depth}, {"hidden_size", l.hiddenSize}, {"num_heads", l.heads},
-      {"intermediate_size", l.intermediateSize}, {"out_hidden_size", l.outputHiddenSize},
-      {"patch_size", l.patchSize}, {"spatial_merge_size", l.spatialMerge},
-      {"temporal_patch_size", 2}, {"in_channels", 3}, {"num_position_embeddings", l.positionGridSide * l.positionGridSide}});
-  requireEqual(requireString(v, @"hidden_act", "vision activation"), "gelu_pytorch_tanh", "vision activation");
-  NSArray *deepstack = requireArray(v, @"deepstack_visual_indexes", "vision deepstack layers");
-  if (deepstack.count) throw std::invalid_argument("vision deepstack layers are unsupported");
+  if (vision == "none") result.visionSource = VisionSource::None;
+  else {
+    if (vision == "safetensors") result.visionSource = VisionSource::Mlx;
+    else if (vision == "gguf") result.visionSource = VisionSource::Gguf;
+    else throw std::invalid_argument("unsupported vision source format: " + vision);
+    NSDictionary *v = requireObject(config, @"vision_config", "vision config");
+    const auto &l = result.vision;
+    requireNumbers(v, {{"depth", l.depth}, {"hidden_size", l.hiddenSize}, {"num_heads", l.heads},
+        {"intermediate_size", l.intermediateSize}, {"out_hidden_size", l.outputHiddenSize},
+        {"patch_size", l.patchSize}, {"spatial_merge_size", l.spatialMerge},
+        {"temporal_patch_size", 2}, {"in_channels", 3}, {"num_position_embeddings", l.positionGridSide * l.positionGridSide}});
+    requireEqual(requireString(v, @"hidden_act", "vision activation"), "gelu_pytorch_tanh", "vision activation");
+    NSArray *deepstack = requireArray(v, @"deepstack_visual_indexes", "vision deepstack layers");
+    if (deepstack.count) throw std::invalid_argument("vision deepstack layers are unsupported");
+  }
   result.packageManifestSha256 = identity;
   if (!result.valid()) throw std::invalid_argument("incompatible target and draft model");
   return result;
