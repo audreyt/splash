@@ -1055,8 +1055,31 @@ class UpstreamTest(unittest.TestCase):
                 self.assertIn(" ".join(str(failure).split()), message)
                 self.assertEqual("hf auth login" in message, hint)
 
+    def test_a_failed_download_is_reported_without_a_traceback(self):
+        fake = fake_hub(self, self.cache)
+        fake.download_failure = httpx.ReadTimeout("timed out")
+        errors = io.StringIO()
+        with (
+            contextlib.redirect_stderr(errors),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            code = models.main(
+                [
+                    "--models",
+                    str(self.root / "fresh"),
+                    "--model",
+                    MODEL,
+                    "--language-only",
+                    "prepare",
+                ]
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            errors.getvalue(), f"error: cannot install {MODEL}: timed out\n"
+        )
+
     def test_verifying_a_missing_installation_says_so(self):
-        for options in ([],):
+        for options in ([], ["--language-only"]):
             with self.subTest(options=options):
                 errors = io.StringIO()
                 with contextlib.redirect_stderr(errors):

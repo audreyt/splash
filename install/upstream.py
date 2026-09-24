@@ -127,12 +127,12 @@ def select_vision(repo):
             raise models.ModelError(
                 f"several {precision} vision projectors, "
                 + ", ".join(name for name, _ in projectors)
-                + ", describe no single tower"
+                + ", describe no single tower; use --language-only to serve text only"
             )
     raise models.ModelError(
         "the GGUF repository has no BF16 or F32 vision projector ("
         + ("; ".join(found) or "no mmproj*.gguf")
-        + ")"
+        + "); use --language-only to serve text only"
     )
 
 
@@ -200,7 +200,9 @@ def _mlx_target(repo, language_only):
         _validate_processor(models.read_json(repo.file("preprocessor_config.json")))
         shards = _weight_files(repo, "vision_tower.")
         if not shards:
-            raise models.ModelError(f"{repo.name} has no vision tower")
+            raise models.ModelError(
+                f"{repo.name} has no vision tower; use --language-only to serve text only"
+            )
         files["vision/config.json"] = "config.json"
         files |= {"vision/" + n: n for n in shards}
     files |= {"target/" + n: n for n in _weight_files(repo)}

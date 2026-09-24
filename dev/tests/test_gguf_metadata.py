@@ -461,7 +461,7 @@ class GgufMetadataTests(unittest.TestCase):
         with self.assertRaisesRegex(
             models.ModelError,
             r"no BF16 or F32 vision projector \(mmproj-f16.gguf \(clip: F16, F32\); "
-            r"mmproj-x.gguf \(qwen35moe: BF16, F32\)\)",
+            r"mmproj-x.gguf \(qwen35moe: BF16, F32\)\); use --language-only",
         ):
             upstream.select_vision(projectors(**{"mmproj-f16": f16, "mmproj-x": text}))
         with self.assertRaisesRegex(

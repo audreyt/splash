@@ -98,6 +98,8 @@ def _ensure_installed(selection):
     ):
         if value is not None:
             command[-1:-1] = [flag, value]
+    if selection.language_only:
+        command.insert(-1, "--language-only")
     if subprocess.run(command, cwd=ROOT).returncode:
         raise LauncherError("model download or verification failed")
 
@@ -166,6 +168,7 @@ def serve(args):
             paths.MODELS,
             args.model,
             revision=args.revision,
+            language_only=args.language_only,
             draft_model=args.draft_model,
         )
         _ensure_installed(selection)
@@ -432,6 +435,11 @@ def parse_args(argv=None):
         "--draft-model",
         type=model_artifacts.parse_draft_model,
         help="override the automatically selected DFlash2 repository or local directory",
+    )
+    server.add_argument(
+        "--language-only",
+        action="store_true",
+        help="skip vision preparation and loading",
     )
     server.add_argument(
         "--served-model-name",
