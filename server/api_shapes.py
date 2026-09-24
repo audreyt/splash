@@ -640,7 +640,7 @@ def _anthropic_content(value, label, document_budget=None):
     return _user_content(parts)
 
 
-def anthropic_to_chat_body(body, *, deadline=None, thinking_resolver=None):
+def anthropic_to_chat_body(body, *, deadline=None, thinking_resolver):
     max_tokens = body.get("max_tokens")
     if (
         not isinstance(max_tokens, int)
@@ -688,7 +688,7 @@ def _anthropic_preserve_thinking(context_management):
     return True if edits else None
 
 
-def anthropic_to_chat_prompt(body, *, deadline=None, thinking_resolver=None):
+def anthropic_to_chat_prompt(body, *, deadline=None, thinking_resolver):
     if not isinstance(body.get("model"), str) or not body["model"]:
         raise APIError(400, "model must be a non-empty string")
     preserve_thinking = _anthropic_preserve_thinking(body.get("context_management"))
@@ -773,10 +773,6 @@ def anthropic_to_chat_prompt(body, *, deadline=None, thinking_resolver=None):
                 if not isinstance(signature, str):
                     raise APIError(400, "invalid thinking signature")
                 if signature:
-                    if thinking_resolver is None:
-                        raise APIError(
-                            400, "thinking signature requires its serving instance"
-                        )
                     try:
                         reasoning = thinking_resolver(signature)
                     except APIError as error:
