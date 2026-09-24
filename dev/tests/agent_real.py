@@ -120,6 +120,15 @@ def executed_commands(name, parsed, messages=()):
                     commands.append(calls[message["tool_call_id"]])
         return commands
     for event in parsed:
+        if name == "pi" and event.get("toolName") == "bash":
+            if event.get("type") == "tool_execution_start":
+                calls[event["toolCallId"]] = event.get("args", {}).get("command", "")
+            if (
+                event.get("type") == "tool_execution_end"
+                and event.get("isError") is False
+                and event.get("toolCallId") in calls
+            ):
+                commands.append(calls[event["toolCallId"]])
         if name == "codex" and event.get("type") == "item.completed":
             item = event.get("item", {})
             if item.get("type") == "command_execution" and item.get("exit_code") == 0:
@@ -149,6 +158,24 @@ def executed_commands(name, parsed, messages=()):
                 ):
                     commands.append(calls[block["tool_use_id"]])
     return commands
+
+
+def pi_completed(parsed):
+    """Pi's agent ended on a stopped assistant message with text."""
+    messages = [
+        event["message"]
+        for event in parsed
+        if event.get("type") == "message_end"
+        and event.get("message", {}).get("role") == "assistant"
+    ]
+    return bool(
+        messages
+        and messages[-1].get("stopReason") == "stop"
+        and any(
+            block.get("text", "").strip() for block in messages[-1].get("content", [])
+        )
+        and any(event.get("type") == "agent_end" for event in parsed)
+    )
 
 
 # The engine's own critical verdict drops every evictable cache entry and
@@ -379,10 +406,18 @@ class ClientRun:
         self.session = None
         self.phases = []
         self.codex_home = (folder / "codex-home").resolve()
+        self.pi_home = (folder / "pi-agent").resolve()
         folder.mkdir(parents=True)
         fixture(self.workspace)
 
     def argv(self):
+        # Pi keeps its providers, sessions, settings and extensions in one
+        # agent directory; a private one leaves the developer's untouched.
+        environment = (
+            dict(os.environ, PI_CODING_AGENT_DIR=str(self.pi_home))
+            if self.name == "pi"
+            else None
+        )
         argv, env = clients.command(
             self.name,
             self.path,
@@ -390,6 +425,7 @@ class ClientRun:
             self.model,
             self.context,
             launcher.RUNTIME_DIR,
+            environment,
             input_modalities=self.input_modalities,
         )
         # subprocess(cwd=...) does not update inherited PWD. Keep both views
@@ -424,6 +460,10 @@ class ClientRun:
             if self.session:
                 argv += ["resume", self.session]
             argv += ["--json", "-"]
+        elif self.name == "pi":
+            argv += ["--print", "--mode", "json"]
+            if self.session:
+                argv += ["--session", self.session]
         else:
             argv += ["--oneshot", "--query-file", "-"]
             if self.session:
@@ -547,6 +587,8 @@ class ClientRun:
         text = log.read_text(errors="replace")
         parsed = events(text)
         for e in parsed:
+            if self.name == "pi" and e.get("type") == "session":
+                self.session = e.get("id", self.session)
             self.session = e.get(
                 "session_id", e.get("sessionID", e.get("thread_id", self.session))
             )
@@ -621,6 +663,11 @@ class ClientRun:
             elif self.name == "codex":
                 if not any(e.get("type") == "turn.completed" for e in parsed):
                     raise AgentFailure("Codex did not complete its turn")
+            elif self.name == "pi":
+                if not pi_completed(parsed):
+                    raise AgentFailure(
+                        "Pi did not finish its user turn with assistant text"
+                    )
             else:
                 if any(e.get("type") == "error" for e in parsed):
                     raise AgentFailure("OpenCode reported a request error")
@@ -656,6 +703,14 @@ class ClientRun:
                 for p in found
                 for e in events(p.read_text())
                 if e.get("type") == "compacted"
+            ]
+        if self.name == "pi":
+            found = (self.pi_home / "sessions").rglob(f"*_{self.session}.jsonl")
+            return [
+                entry
+                for path in found
+                for entry in events(path.read_text())
+                if entry.get("type") == "compaction"
             ]
         if self.name == "opencode":
             argv, env = clients.command(

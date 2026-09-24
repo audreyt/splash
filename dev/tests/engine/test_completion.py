@@ -221,7 +221,10 @@ class CompletionTests(unittest.TestCase):
     def test_actual_bash_completion(self):
         _, directory = self.layout()
         cases = (
-            (["splash", ""], ["serve", "claude", "codex", "opencode", "hermes"]),
+            (
+                ["splash", ""],
+                ["serve", "claude", "codex", "opencode", "hermes", "pi"],
+            ),
             (["splash", "co"], ["codex"]),
             (
                 ["splash", "serve", "--model", ""],
@@ -293,7 +296,7 @@ class CompletionTests(unittest.TestCase):
                         ),
                         expected,
                     )
-            for agent in ("claude", "codex", "opencode", "hermes"):
+            for agent in ("claude", "codex", "opencode", "hermes", "pi"):
                 with self.subTest(shell=shell, agent=agent):
                     self.assertEqual(
                         self.bash_complete(
@@ -416,6 +419,7 @@ class CompletionTests(unittest.TestCase):
         _, directory = self.layout()
         for line, expected in (
             ("splash se", "splash serve "),
+            ("splash p", "splash pi "),
             ("splash serve --model community/l", f"splash serve --model {LOCAL[1]} "),
             ("splash serve --model=community/l", f"splash serve --model={LOCAL[1]} "),
             (
@@ -423,6 +427,7 @@ class CompletionTests(unittest.TestCase):
                 f"splash serve --model {GGUF[1]} ",
             ),
             ("splash claude --model community/l", "splash claude --model community/l"),
+            ("splash pi --model community/l", "splash pi --model community/l"),
         ):
             with self.subTest(line=line):
                 self.assertEqual(self.shell_tab(directory / "_splash", line), expected)

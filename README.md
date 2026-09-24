@@ -33,8 +33,11 @@ Once it prints `Ready`, leave this terminal open. Open <http://127.0.0.1:8000>
 in your browser, or run an installed coding agent from another terminal:
 
 ```bash
-splash opencode    # or: splash claude / splash codex / splash hermes
+splash opencode    # or: splash claude / splash codex / splash hermes / splash pi
 ```
+
+`splash pi` adds a `splash` provider to Pi's `models.json` and leaves Pi's
+other providers, settings and sessions alone.
 
 Press Ctrl+C in the server terminal to stop Splash.
 

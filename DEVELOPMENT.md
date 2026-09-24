@@ -29,7 +29,7 @@ stops serving; stop before upgrading.
 
 Use `--max-context 100K` or `--max-memory 28G` to set optional limits. Memory
 limits cap Metal allocations, not combined process RSS. Agents must already be
-installed; `./splash claude|opencode|codex|hermes` connects to the running server.
+installed; `./splash claude|opencode|codex|hermes|pi` connects to the running server.
 Arguments pass through, for example `./splash codex resume --last`.
 
 Set `SPLASH_API_KEY` in the server and agent shells to require authentication;
@@ -295,7 +295,7 @@ image and file parts, and message normalization, the one place that accepts or
 rejects them, checks before any image is decoded or PDF rendered, in user
 turns, tool results and stored Responses history alike. `/status` and
 `/v1/models` report `vision: false` and `input_modalities: ["text"]`, and the
-launchers configure OpenCode and Hermes without attachments.
+launchers configure OpenCode, Hermes and Pi without attachments.
 
 ### Weight preparation
 
@@ -779,8 +779,8 @@ and `REVISION`, `DRAFT_MODEL` and `LANGUAGE_ONLY=1` as its `--revision`,
 | `verify-models` | the installer's restarts without the Hub, `verify --full`, and the prepared-weight record (`dev/tools/installer_restarts.py`, [Release check](#release-check)) |
 | `test-real` | vision parity with the family's fixture in `dev/tests/fixtures/vision-parity/` when the installation serves vision, and the native model runtime oracle |
 | `test-http-real` | the HTTP frontend on an isolated server (`dev/tests/smoke_real.py`) |
-| `test-agent-real` | the four official clients through `splash serve` (`dev/tests/agent_real.py`), in `AGENT_SCENARIO` `complete` (the default) or `smoke` |
-| `test-release-real` | the HTTP smoke and all four clients on one `splash serve` |
+| `test-agent-real` | the five official clients through `splash serve` (`dev/tests/agent_real.py`), in `AGENT_SCENARIO` `complete` (the default) or `smoke` |
+| `test-release-real` | the HTTP smoke and all five clients on one `splash serve` |
 | `test-performance-real` | the native decode and partial-prefix benchmark, or with `BASELINE` its ABBA comparison with that build (`dev/benchmarks/backend_regression.py`) |
 | `release-check` | one model on this Mac ([Release check](#release-check)) |
 
@@ -868,7 +868,7 @@ two Macs. The unpinned `verify-models`, run after the pinned ones while the
 default branch still names the pinned commit, resolves the branch online, and
 its unreachable-Hub restart must fall back with the Hub's reason. The agent
 clients depend on neither the model's format nor the GPU: run the smoke
-scenario once per Mac, with the four clients split between the Macs, and
+scenario once per Mac, with the five clients split between the Macs, and
 `AGENT_SCENARIO=complete` for one model when the client integration changed.
 Expect about 1.5 hours on an M5 Pro and 2.5 hours on an M3 Max, most of it in
 the three 27B comparisons. A laptop can cap its GPU power during a long
