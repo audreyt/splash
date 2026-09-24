@@ -50,6 +50,9 @@ void Engine::submit(EngineRequest value) {
       })) {
     throw std::invalid_argument("prompt token is out of vocabulary");
   }
+  if (!value.images.empty() && !config_.maxImagePatches) {
+    throw std::invalid_argument("this model is serving without vision");
+  }
   uint64_t previousImageEnd = 0;
   uint64_t pixelBytes = 0;
   for (const ImageSpan &image : value.images) {
