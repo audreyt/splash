@@ -14,7 +14,6 @@
 
 #include <algorithm>
 #include <array>
-#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -2048,19 +2047,18 @@ Runtime::prefillAsync(const BatchPlan &plan,
       if (entry.promptComplete && !entry.replayingGeneration) {
         entry.pendingToken.reset();
         if (!entry.scoreTokens.empty()) {
-          // Score-only: read the raw bf16 logits at the final prompt position
+          // Score-only: read the raw fp32 logits at the final prompt position
           // (row lastRows-1 of the gathered head input) in requested order.
           const uint32_t lastRows = std::min(item.tokenCount, kDecodeRows);
-          const uint16_t *logits = contents<uint16_t>(
+          const float *logits = contents<float>(
               impl->decodeArena->get(lane, DecodeTensor::Logits),
               "score logits");
-          const uint16_t *row =
+          const float *row =
               logits + uint64_t{lastRows - 1} *
                            impl->geometry.target.vocabularySize;
           result.scoreLogits.reserve(entry.scoreTokens.size());
           for (uint32_t token : entry.scoreTokens) {
-            const float logit =
-                std::bit_cast<float>(uint32_t{row[token]} << 16);
+            const float logit = row[token];
             if (!std::isfinite(logit)) {
               // A numerical outcome for this request, not a broken invariant:
               // report it as a lane failure so the engine drops this request

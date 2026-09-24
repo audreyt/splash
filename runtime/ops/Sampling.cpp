@@ -51,7 +51,7 @@ DraftSelectorWorkspace Sampling::draftWorkspace(uint32_t positions) {
   // The partial values are followed by each position's 16 x 16 edge table.
   return {candidates * kDraftShards * sizeof(uint32_t),
           candidates * (kDraftShards + kDraftCandidates) * sizeof(float),
-          candidates * sizeof(uint32_t), candidates * sizeof(uint16_t),
+          candidates * sizeof(uint32_t), candidates * sizeof(float),
           candidates * sizeof(float)};
 }
 
@@ -98,7 +98,7 @@ void Sampling::addInitial(metal::CommandGraph &graph,
 
   metal::MetalBuffer logits = buffers.logits;
   if (rowOffset) {
-    const uint64_t rowBytes = uint64_t{vocabulary_} * sizeof(uint16_t);
+    const uint64_t rowBytes = uint64_t{vocabulary_} * sizeof(float);
     logits = backend_.view(logits, uint64_t{rowOffset} * rowBytes, rowBytes);
   }
   graph.add("decode_sample_argmax_sharded",

@@ -105,7 +105,7 @@ int main(int argc, char **argv) {
       layout.intermediateSize = 512;
       prepare(backend, root, layout);
       // The target loader reads the prepared files as affine Q4 projections of
-      // the layout's sizes with bf16 norms.
+      // the layout's sizes with bf16 norms, the head into fp32 logits.
       model::AffineTargetLoader files(backend, root, layout);
       const model::Qwen3_8Weights weights = model::loadQwen3_8Weights(backend, layout, files);
       const auto affine = [](const ops::Projection &p, uint32_t n, uint32_t k) {
@@ -113,6 +113,7 @@ int main(int argc, char **argv) {
       };
       bool read = weights.layers.size() == layout.layers && !weights.finalNorm.float32 &&
                   affine(weights.logitsProjection, layout.vocabularySize, layout.hiddenSize) &&
+                  weights.logitsProjection.destination == ops::FloatOutput::Float32 &&
                   weights.tokenEmbedding.layout() == ops::WeightLayout::Affine64;
       for (const auto &layer : weights.layers) {
         read = read && !layer.inputNorm.float32 && !layer.postAttentionNorm.float32 &&
