@@ -335,6 +335,9 @@ class CompletionTests(unittest.TestCase):
         zsh = shell == "/bin/zsh"
         capture = self.root / "shell captured result"
         capture.unlink(missing_ok=True)
+        # The capture is read as soon as it exists, so each writer renames
+        # its complete result into place.
+        publish = '> "$CAPTURE.part" && mv "$CAPTURE.part" "$CAPTURE"'
         environment = {
             **self.env,
             "COMPLETION_SCRIPT": str(script),
@@ -357,7 +360,9 @@ class CompletionTests(unittest.TestCase):
                     else 'autoload -Uz compinit; compinit -D -u; source "$COMPLETION_SCRIPT"; '
                 )
                 setup += (
-                    'function capture_buffer() { print -r -- "$BUFFER" > "$CAPTURE"; }; '
+                    'function capture_buffer() { print -r -- "$BUFFER" '
+                    + publish
+                    + "; }; "
                     "zle -N capture_buffer; bindkey '^X' capture_buffer; "
                     "print -r -- COMPLETION_READY\n"
                 )
@@ -365,9 +370,12 @@ class CompletionTests(unittest.TestCase):
             else:
                 # Enter runs this test-only argv recorder, never the real launcher.
                 recorder = self.root / "splash"
-                recorder.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$CAPTURE"\n')
+                recorder.write_text('#!/bin/sh\nprintf "%s\\n" "$@" ' + publish + "\n")
                 recorder.chmod(0o755)
-                setup = 'source "$COMPLETION_SCRIPT"; splash() { printf "%s\\n" "$@" > "$CAPTURE"; }; '
+                setup = (
+                    'source "$COMPLETION_SCRIPT"; '
+                    'splash() { printf "%s\\n" "$@" ' + publish + "; }; "
+                )
                 if unbroken:
                     setup += f"COMP_WORDBREAKS=${{COMP_WORDBREAKS//[{unbroken}]/}}; "
                 setup += 'printf "COMPLETION_READY\\n"\n'
