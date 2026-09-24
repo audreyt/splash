@@ -91,8 +91,10 @@ which shares vocabulary, merges and pre-tokenizer (used only as a test reference
   (system messages, tool calls and results, image placeholders, tools and
   thinking on and off) match the original template and the reference token IDs.
 
-That comparison script is not in the repository. The committed check is
-`python -m unittest dev.tests.test_gguf_metadata` (synthetic metadata).
+That comparison script is not in the repository. The committed checks are
+`python -m unittest dev.tests.test_gguf_metadata` (synthetic metadata) and the
+chat-template probe tests over the embedded templates in
+`dev/tests/fixtures/chat_templates/`.
 
 ## Preparation cost
 
