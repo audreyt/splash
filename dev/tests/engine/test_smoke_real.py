@@ -248,6 +248,31 @@ class SmokeRealTests(unittest.TestCase):
                 ):
                     self.run_images(output)
 
+    def test_requests_send_the_api_key_the_server_requires(self):
+        for key in (None, "", "secret"):
+            with self.subTest(key=key):
+                environment = {} if key is None else {"SPLASH_API_KEY": key}
+                with (
+                    mock.patch.dict(smoke_real.os.environ, environment, clear=True),
+                    mock.patch.object(
+                        smoke_real.http.client, "HTTPConnection"
+                    ) as connection,
+                ):
+                    response = connection.return_value.getresponse.return_value
+                    response.status = 200
+                    response.read.return_value = b"{}"
+                    smoke_real.request(8000, "GET", "/status")
+                    smoke_real.request(8000, "POST", "/v1/models", {"a": 1})
+                    smoke_real.stream_request(8000, "/v1/chat/completions", {})
+                calls = connection.return_value.request.call_args_list
+                headers = [call.args[3] for call in calls]
+                self.assertEqual(
+                    [header.get("Authorization") for header in headers],
+                    [f"Bearer {key}" if key else None] * 3,
+                )
+                self.assertNotIn("Content-Type", headers[0])
+                self.assertEqual(headers[1]["Content-Type"], "application/json")
+
 
 if __name__ == "__main__":
     unittest.main()

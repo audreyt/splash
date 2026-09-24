@@ -9,6 +9,7 @@ import base64
 import http.client
 import io
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -40,12 +41,21 @@ def available_port() -> int:
         return int(listener.getsockname()[1])
 
 
+def request_headers(payload: bool) -> dict:
+    """The JSON content type of a body, and the key the server requires
+    when SPLASH_API_KEY is set: the server's --api-key defaults to it."""
+    headers = {"Content-Type": "application/json"} if payload else {}
+    if key := os.environ.get("SPLASH_API_KEY"):
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
 def request(
     port: int, method: str, path: str, body: dict | None = None, *, timeout: float = 60
 ):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     payload = None if body is None else json.dumps(body).encode()
-    headers = {} if payload is None else {"Content-Type": "application/json"}
+    headers = request_headers(payload is not None)
     try:
         connection.request(method, path, payload, headers)
         response = connection.getresponse()
@@ -63,7 +73,7 @@ def stream_request(port: int, path: str, body: dict) -> tuple[int, str, bytes]:
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
     payload = json.dumps(body).encode()
     try:
-        connection.request("POST", path, payload, {"Content-Type": "application/json"})
+        connection.request("POST", path, payload, request_headers(True))
         response = connection.getresponse()
         return response.status, response.getheader("Content-Type", ""), response.read()
     finally:
