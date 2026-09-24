@@ -540,6 +540,7 @@ class Frontend:
             try:
                 tokens, slots, prompt = judgments.encode_prompt(
                     self.tokenizer,
+                    self.chat_templates.select(None).source,
                     judgments.judgment_messages(body),
                     judgments.LETTERS[: len(body["options"])],
                     admit=admit,
@@ -632,6 +633,7 @@ class Frontend:
                 try:
                     tokens, slot_ids, prompt = judgments.encode_prompt(
                         self.tokenizer,
+                        self.chat_templates.select(None).source,
                         judgments.systemone_messages(state, spec, labels),
                         labels,
                         admit=admit,

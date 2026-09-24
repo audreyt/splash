@@ -494,6 +494,26 @@ class ChatTemplateFrontendTests(unittest.TestCase):
         self.assertIn("<|image_pad|>", rendered)
         self.assertEqual(harness.tokenizer.renderer.chat_template, source("qwen36"))
 
+    class ScoringTokenizer(
+        fixtures.TemplateTokenizer, fixtures.ServerTest.CharTokenizer
+    ):
+        """Renders the real template; one token per character for answer slots."""
+
+    def test_scoring_prompts_use_the_template_chosen_at_startup(self):
+        tokenizer = self.ScoringTokenizer(source("qwen36"))
+        app = fixtures.make_frontend(
+            tokenizer, None, "test-model", 8192, 16, 10, 2, vision=True
+        )
+        tokenizer.templates.clear()
+        app.prepare_judgment(fixtures.ServerTest.judgment_body())
+        app.prepare_systemone(
+            {"model": "test-model", "state": {}, "questions": {"q": {"type": "noul"}}}
+        )
+        self.assertEqual(
+            [kwargs.get("chat_template") for _, kwargs in tokenizer.templates],
+            [app.chat_templates.select(None).source] * 2,
+        )
+
     def test_codex_shaped_responses_render_instructions_first_and_later_in_place(self):
         harness = self.harness(source("qwen36_gguf"), fixtures.FakeRuntime())
         body = {
