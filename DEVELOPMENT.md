@@ -118,7 +118,8 @@ part: `hub.py` the sources, the Hub cache and its pins; `assembly.py` the
 assembly layout, its build, verification and garbage collection, and the
 metadata derived from a GGUF; `families.py` the registry; `legacy.py` Splash
 packages; and `models.py` model IDs, selections, the installation lock and the
-command line (`install/models.py --model ID prepare|verify`). The assembly's
+command line (`install/models.py --model ID prepare|verify|link`, where `link`
+prints the selection link). The assembly's
 `model.json` records the resolved sources and selected formats. The native
 loader reads it, and `splash serve`, `test-http-real` and the HTTP regression
 benchmark hold it while they run, so a concurrent installation cannot collect
@@ -767,18 +768,21 @@ supported Metal device and runs the kernel tests under shader validation. They
 include the preparation of small synthetic MLX, GGUF and vision sources and the
 GGUF kernels on synthetic tensors. Hosted CI runs CPU checks and sanitizers.
 
-The real-model targets take `MODEL` exactly as `splash serve --model` does and
-run the installation `make install MODEL=...` prepared in this checkout's
+The real-model targets take `MODEL` exactly as `splash serve --model` does,
+and `REVISION`, `DRAFT_MODEL` and `LANGUAGE_ONLY=1` as its `--revision`,
+`--draft-model` and `--language-only`, and run the installation
+`make install MODEL=...` with the same options prepared in this checkout's
 `install/models`:
 
 | Target | Runs |
 | --- | --- |
-| `test-real` | vision parity with the family's fixture in `dev/tests/fixtures/vision-parity/`, and the native model runtime oracle |
+| `verify-models` | the installer's restarts without the Hub, `verify --full`, and the prepared-weight record (`dev/tools/installer_restarts.py`, [Release check](#release-check)) |
+| `test-real` | vision parity with the family's fixture in `dev/tests/fixtures/vision-parity/` when the installation serves vision, and the native model runtime oracle |
 | `test-http-real` | the HTTP frontend on an isolated server (`dev/tests/smoke_real.py`) |
-| `test-agent-real` | the four official clients through `splash serve` (`dev/tests/agent_real.py`) |
+| `test-agent-real` | the four official clients through `splash serve` (`dev/tests/agent_real.py`), in `AGENT_SCENARIO` `complete` (the default) or `smoke` |
 | `test-release-real` | the HTTP smoke and all four clients on one `splash serve` |
-| `test-performance-real` | the native prefill, decode and batch benchmark |
-| `release-check` | `check`, `verify-models`, sanitizers, `test-real`, `test-release-real`, `test-performance-real` |
+| `test-performance-real` | the native decode and partial-prefix benchmark, or with `BASELINE` its ABBA comparison with that build (`dev/benchmarks/backend_regression.py`) |
+| `release-check` | one model on this Mac ([Release check](#release-check)) |
 
 `benchmark-backend`, `benchmark-decode-profile` and `tune-kernels` take `MODEL`
 the same way. The models they are run with, one per family and source format:
@@ -790,13 +794,7 @@ the same way. The models they are run with, one per family and source format:
 
 The source formats load differently: an MLX target is prepared into the packed
 layout, a GGUF target into its own layout for the GGUF projection and MoE
-kernels, and a package's packed files are mapped as they are. Before release,
-install all four agents and run `make release-check MODEL=...` for each model
-from a clean checkout. It includes correctness, sanitizers, real HTTP/client
-behavior and performance characterization. The hardware release gate
-(`release-hardware` in `.github/workflows/ci.yml`) runs it on self-hosted Macs
-for the two Splash packages only, so its real-model part exercises neither the
-preparation of a real MLX model nor a GGUF model.
+kernels, and a package's packed files are mapped as they are.
 
 `make test-engine-cpu` builds the affine source oracle so it cannot break
 unnoticed, but no target runs it because it needs real models: after
@@ -815,6 +813,62 @@ header, since GGUF projection and MoE plans read no tuned choice
 ([GGUF targets](#gguf-targets)). Keep generated reports, profiles, local paths
 and experiment notes out of the source tree and commits.
 
+### Release check
+
+A release is checked once per source identity, and then on each Apple GPU
+family (an Apple9 M3 and an Apple10 M5) against the previous release's build,
+retained as `BASELINE`: a checkout whose `build/` holds `splash`,
+`splash.metallib` and `engine-tests/backend-benchmark`. From a clean checkout:
+
+```sh
+make check test-sanitizers                      # once, model-free
+make check-native-metal                         # once on each Mac
+make install release-check MODEL=mlx-community/Qwen3.8-27B-4bit REVISION=<commit> BASELINE=../splash-1.0.2
+make install release-check MODEL=unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M LANGUAGE_ONLY=1 REVISION=<commit> BASELINE=...
+make install release-check MODEL=mlx-community/Qwen3.6-35B-A3B-4bit REVISION=<commit> BASELINE=...
+make install release-check MODEL=unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M REVISION=<commit> BASELINE=...
+make release-check MODEL=incoai/Qwen3.8-27B-Splash BASELINE=...
+make install verify-models MODEL=mlx-community/Qwen3.6-35B-A3B-4bit
+make test-agent-real MODEL=mlx-community/Qwen3.6-35B-A3B-4bit REVISION=<commit> AGENT_SCENARIO=smoke AGENT_CLIENTS=...
+```
+
+Pin each upstream model to one commit, the same on both Macs. Without a Hub
+token for the draft repository, set `DRAFT_MODEL` to a draft folder
+([Draft assets](#draft-assets)). The Metal suite depends on the GPU family, so
+it runs once on each Mac. Per model, `release-check`:
+
+- runs the runtime oracle and, when the installation serves vision, vision
+  parity (`test-real`);
+- restarts the installer offline, with the Hub unreachable
+  (`HF_ENDPOINT=http://127.0.0.1:9`) and with an empty `HF_HUB_CACHE`: each
+  restart must start the same assembly within 10 seconds, name the Hub's
+  reason on one line when it asked the Hub ([Revisions](#revisions)), and
+  download nothing. It then hashes the sources and records in
+  `prepared.json` the component and SHA-256 of every prepared-weight entry
+  the installation loads (`verify-models`; a legacy package is only hashed);
+- runs the HTTP smoke, which for a text-only installation checks the 400s
+  instead of images (`test-http-real`);
+- compares this build with `BASELINE` in ABBA order (`test-performance-real`):
+  output tokens and acceptance must be identical (`EXPECT_OUTPUT_CHANGE=1`
+  allows changed outputs with acceptance within 0.02), and so must the
+  prepared bytes, which a baseline of another preparation identity prepares
+  into a cache of its own; decode and prefill GPU time may regress by at most
+  the larger of 2% and twice the run's own ABBA spread, and a spread above 5%
+  fails as inconclusive.
+
+Results go to `build/release/<owner>--<repo>[:VARIANT]/`. Preparation does not
+depend on the GPU, so each model's `prepared.json` must be identical on the
+two Macs. The unpinned `verify-models`, run after the pinned ones while the
+default branch still names the pinned commit, resolves the branch online, and
+its unreachable-Hub restart must fall back with the Hub's reason. The agent
+clients depend on neither the model's format nor the GPU: run the smoke
+scenario once per Mac, with the four clients split between the Macs, and
+`AGENT_SCENARIO=complete` for one model when the client integration changed.
+Expect about 1.5 hours on an M5 Pro and 2.5 hours on an M3 Max, most of it in
+the three 27B comparisons. A laptop can cap its GPU power during a long
+comparison and so make it inconclusive; rerun `make test-performance-real` for
+that model alone once the Mac has cooled.
+
 ### Local benchmarks
 
 From a source checkout with the model installed, use the native benchmark for
@@ -822,11 +876,17 @@ prefill, decode and batch measurements:
 
 ```sh
 make test-performance-real MODEL=mlx-community/Qwen3.8-27B-4bit
+make test-performance-real MODEL=mlx-community/Qwen3.8-27B-4bit BASELINE=/path/to/baseline
 ```
 
-It writes `build/release/backend-benchmark.json`; repeat it for each model.
-This characterizes one build; it is not a comparison with another engine or a
-test of agent task quality.
+The first characterizes this build: the decode widths B1-B4 and a 14,096-token
+partial-prefix request, three samples each, in
+`build/release/<owner>--<repo>[:VARIANT]/backend-benchmark.json`;
+`make benchmark-backend MODEL=...` adds the 2K to 128K contexts. The second
+compares this build with a retained checkout's in ABBA order, as the release
+check does ([Release check](#release-check)), and writes
+`backend-regression.json` there. Neither is a comparison with another engine
+or a test of agent task quality.
 
 For a same-machine HTTP regression check, retain the previous `splash` binary
 **and its adjacent `splash.metallib`**, then run from the candidate checkout:
@@ -840,8 +900,9 @@ For a same-machine HTTP regression check, retain the previous `splash` binary
 
 It takes any installed model and, for an upstream one, holds its assembly for
 the whole run, so every round serves the same model. It starts isolated servers
-in alternating order, compares matched cold, exact-prefix and decode requests,
-and saves `build/release/http-regression.json`.
+in ABBA order, compares matched cold, exact-prefix and decode requests by the
+release check's speed rule and prepared bytes, and saves
+`build/release/http-regression.json`.
 It does not contact your running server. Use the same power mode and charger,
 stop other GPU workloads, and report chip/GPU cores, memory, Splash version,
 model revision, actual input/output token counts, and cache hits with results.
