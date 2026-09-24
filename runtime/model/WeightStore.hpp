@@ -2,14 +2,17 @@
 
 #include "metal/MetalBackend.hpp"
 #include "ops/Linear.hpp"
+#include "ops/Normalization.hpp"
 
 #include <cstdint>
 #include <filesystem>
+#include <initializer_list>
 #include <memory>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace splash::model {
 
@@ -46,6 +49,9 @@ public:
 
   [[nodiscard]] metal::MetalBuffer section(uint64_t bytes,
                                             std::string_view label = {});
+  // One section of the parts' total bytes, as a view of each part in order.
+  [[nodiscard]] std::vector<metal::MetalBuffer> split(std::initializer_list<uint64_t> parts,
+                                                      std::string_view label);
   void finish();
   [[nodiscard]] const WeightFileRecord &record() const noexcept;
 
@@ -60,26 +66,29 @@ private:
                                      uint32_t inputSize);
 void validateQ4Layout(uint32_t outputSize, uint32_t inputSize);
 
-[[nodiscard]] ops::Q4Projection
-readQ4Projection(WeightFile &file, metal::MetalBackend &backend,
-                 uint32_t outputSize, uint32_t inputSize,
-                 std::string_view label);
+[[nodiscard]] ops::Projection
+readAffineProjection(WeightFile &file, uint32_t outputSize, uint32_t inputSize,
+                     std::string_view label);
+
+// A norm of `width` multipliers: F32 when `float32` (a GGUF image keeps its
+// norms as the GGUF stores them), bf16 otherwise.
+[[nodiscard]] ops::NormWeights readNorm(WeightFile &file, uint32_t width,
+                                        bool float32, std::string_view label);
 
 // Embedding weights, scales and biases are independently aligned sections
 // so token gather can bind each table directly.
-[[nodiscard]] ops::Q4Projection
-readQ4ProjectionComponents(WeightFile &file, uint32_t outputSize,
+[[nodiscard]] ops::EmbeddingWeights
+readAffineEmbedding(WeightFile &file, uint32_t outputSize,
                            uint32_t inputSize, std::string_view label);
 
 [[nodiscard]] ops::Q8Projection
-readQ8Projection(WeightFile &file, metal::MetalBackend &backend,
-                 uint32_t outputSize, uint32_t inputSize,
-                 std::string_view label);
-
-[[nodiscard]] ops::ExpertQ4Projection
-readExpertQ4Projection(WeightFile &file, uint32_t experts,
-                       uint32_t outputSize, uint32_t inputSize,
+readAffineQ8Projection(WeightFile &file, uint32_t outputSize, uint32_t inputSize,
                        std::string_view label);
+
+[[nodiscard]] ops::ExpertProjection
+readAffineExpertProjection(WeightFile &file, uint32_t experts,
+                           uint32_t outputSize, uint32_t inputSize,
+                           std::string_view label);
 
 [[nodiscard]] std::string
 weightManifestFingerprint(std::span<const WeightFileRecord> records);

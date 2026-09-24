@@ -7,6 +7,7 @@
 #include "ops/ExecutionPlans.hpp"
 #include "ops/Linear.hpp"
 #include "ops/MoE.hpp"
+#include "ops/Normalization.hpp"
 #include "ops/PagedAttention.hpp"
 
 #include <array>
@@ -27,19 +28,19 @@ enum class QwenFfnKind : uint8_t { Dense, SparseMoe };
 // Both supported targets bind the same mixer tensors per hybrid layer; only
 // the FFN differs between them.
 struct QwenGdnWeights final {
-  ops::Q4Projection inputProjection;
+  ops::Projection inputProjection;
   metal::MetalBuffer convolutionWeights;
   metal::MetalBuffer decay;
   metal::MetalBuffer timeBias;
-  metal::MetalBuffer mixerNorm;
-  ops::Q4Projection outputProjection;
+  ops::NormWeights mixerNorm;
+  ops::Projection outputProjection;
 };
 
 struct QwenAttentionWeights final {
-  ops::Q4Projection inputProjection;
-  metal::MetalBuffer queryNorm;
-  metal::MetalBuffer keyNorm;
-  ops::Q4Projection outputProjection;
+  ops::Projection inputProjection;
+  ops::NormWeights queryNorm;
+  ops::NormWeights keyNorm;
+  ops::Projection outputProjection;
 };
 
 using QwenMixerWeights = std::variant<QwenGdnWeights, QwenAttentionWeights>;
@@ -58,7 +59,6 @@ struct QwenMixerGeometry final {
 
 // Reads the mixer sections that follow a layer's input norm, in file order.
 [[nodiscard]] QwenMixerWeights readQwenMixer(WeightFile &file,
-                                             metal::MetalBackend &backend,
                                              const QwenMixerGeometry &geometry,
                                              bool fullAttention);
 
@@ -78,8 +78,6 @@ loadQwenTargetWeights(metal::MetalBackend &backend,
   result.layout = layout;
   result.layers.reserve(layout.layers);
 
-  const uint64_t hiddenBytes = checkedWeightMultiply(
-      layout.hiddenSize, kBFloat16Bytes, "Qwen norm bytes");
   for (uint32_t layerIndex = 0; layerIndex < layout.layers; ++layerIndex) {
     const bool fullAttention = layout.isFullAttentionLayer(layerIndex);
     const std::string filename =
@@ -87,11 +85,11 @@ loadQwenTargetWeights(metal::MetalBackend &backend,
     WeightFile file(backend, directory / filename, "target/" + filename,
                     Layout::layerMagic, layerIndex, fullAttention ? 1U : 0U);
     auto &layer = result.layers.emplace_back();
-    layer.inputNorm = file.section(hiddenBytes, "input-norm");
+    layer.inputNorm = readNorm(file, layout.hiddenSize, false, "input-norm");
     layer.mixer =
-        readQwenMixer(file, backend, layout.mixerGeometry(), fullAttention);
+        readQwenMixer(file, layout.mixerGeometry(), fullAttention);
     layer.postAttentionNorm =
-        file.section(hiddenBytes, "post-attention-norm");
+        readNorm(file, layout.hiddenSize, false, "post-attention-norm");
     readFfn(file, layer);
     file.finish();
     result.files.push_back(file.record());
@@ -100,9 +98,9 @@ loadQwenTargetWeights(metal::MetalBackend &backend,
   {
     WeightFile file(backend, directory / "head.bin", "target/head.bin",
                     headMagic, layout.layers, 2);
-    result.finalNorm = file.section(hiddenBytes, "final-norm");
-    result.logitsProjection = readQ4Projection(
-        file, backend, layout.vocabularySize, layout.hiddenSize, "logits");
+    result.finalNorm = readNorm(file, layout.hiddenSize, false, "final-norm");
+    result.logitsProjection = readAffineProjection(
+        file, layout.vocabularySize, layout.hiddenSize, "logits");
     file.finish();
     result.files.push_back(file.record());
   }
@@ -110,7 +108,7 @@ loadQwenTargetWeights(metal::MetalBackend &backend,
     WeightFile file(backend, directory / "embedding.bin",
                     "target/embedding.bin", kEmbeddingMagic,
                     layout.vocabularySize, layout.hiddenSize);
-    result.tokenEmbedding = readQ4ProjectionComponents(
+    result.tokenEmbedding = readAffineEmbedding(
         file, layout.vocabularySize, layout.hiddenSize, "embedding");
     file.finish();
     result.files.push_back(file.record());
@@ -328,7 +326,7 @@ public:
   [[nodiscard]] const QwenTargetGeometry &geometry() const noexcept {
     return geometry_;
   }
-  [[nodiscard]] const ops::Q4Projection &
+  [[nodiscard]] const ops::Projection &
   vocabularyProjection() const noexcept;
 
   void addPrefill(
@@ -340,7 +338,7 @@ public:
       std::span<const kv::LayerStorage> kvLayers,
       std::span<const kv::Q8ChunkedPrefillParams> q8,
       std::span<const kv::Q8VerifyAttentionParams> verify, uint32_t lanes,
-      ops::Q4DispatchStats &stats) const;
+      ops::LinearDispatchStats &stats) const;
   void addHead(metal::CommandGraph &graph, metal::MetalBuffer hidden,
                metal::MetalBuffer finalHidden, metal::MetalBuffer logits,
                uint32_t normalizedRows, ops::LinearScratch scratch = {}) const;
@@ -366,7 +364,7 @@ private:
       std::span<const kv::LayerStorage> kvLayers,
       std::span<const kv::Q8ChunkedPrefillParams> q8,
       std::span<const kv::Q8VerifyAttentionParams> verify, uint32_t lanes,
-      ops::Q4DispatchStats &stats) const;
+      ops::LinearDispatchStats &stats) const;
 
   WeightView weights_;
   QwenTargetGeometry geometry_;

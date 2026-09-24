@@ -44,14 +44,6 @@ namespace {
     return checkedWeightMultiply(outputSize, inputSize, "Q4 element count");
 }
 
-[[nodiscard]] uint64_t q8PackedBytes(uint32_t outputSize, uint32_t inputSize) {
-    uint64_t elements = q4Elements(outputSize, inputSize);
-    return checkedWeightAdd(
-        elements,
-        checkedWeightMultiply(elements / 32, 2, "Q8 parameter byte count"),
-        "Q8 packed byte count");
-}
-
 } // namespace
 
 uint64_t q4PackedBytes(uint32_t outputSize, uint32_t inputSize) {
@@ -211,6 +203,20 @@ metal::MetalBuffer WeightFile::section(uint64_t bytes,
     return impl_->backend->view(impl_->base, start, bytes);
 }
 
+std::vector<metal::MetalBuffer> WeightFile::split(std::initializer_list<uint64_t> parts,
+                                                  std::string_view label) {
+    uint64_t bytes = 0;
+    for (uint64_t part : parts) bytes = checkedWeightAdd(bytes, part, "packed section size");
+    const metal::MetalBuffer whole = section(bytes, label);
+    std::vector<metal::MetalBuffer> views;
+    uint64_t offset = 0;
+    for (uint64_t part : parts) {
+        views.push_back(impl_->backend->view(whole, offset, part));
+        offset += part;
+    }
+    return views;
+}
+
 void WeightFile::finish() {
     if (impl_->finished) return;
     uint64_t consumed = alignPacked(impl_->offset);
@@ -226,64 +232,49 @@ const WeightFileRecord &WeightFile::record() const noexcept {
     return impl_->record;
 }
 
-ops::Q4Projection readQ4Projection(WeightFile &file,
-                                   metal::MetalBackend &backend,
-                                   uint32_t outputSize,
-                                   uint32_t inputSize,
-                                   std::string_view label) {
+ops::Projection readAffineProjection(WeightFile &file, uint32_t outputSize, uint32_t inputSize,
+                                     std::string_view label) {
     validateQ4Layout(outputSize, inputSize);
     const uint64_t elements = q4Elements(outputSize, inputSize);
-    const uint64_t weightBytes = elements / 2;
-    const uint64_t parameterBytes = elements / 32;
-    metal::MetalBuffer packed =
-        file.section(q4PackedBytes(outputSize, inputSize), label);
-    return {
-        backend.view(packed, 0, weightBytes),
-        backend.view(packed, weightBytes, parameterBytes),
-        backend.view(packed, weightBytes + parameterBytes, parameterBytes),
-        outputSize,
-        inputSize,
-    };
+    const std::vector<metal::MetalBuffer> planes =
+        file.split({elements / 2, elements / 32, elements / 32}, label);
+    return {outputSize, inputSize, ops::AffineWeights{planes[0], planes[1], planes[2]}};
 }
 
-ops::Q4Projection readQ4ProjectionComponents(WeightFile &file,
+ops::EmbeddingWeights readAffineEmbedding(WeightFile &file,
                                              uint32_t outputSize,
                                              uint32_t inputSize,
                                              std::string_view label) {
     const uint64_t elements = q4Elements(outputSize, inputSize);
     const std::string prefix(label);
-    return {
-        file.section(elements / 2, prefix + "-weights"),
-        file.section(elements / 32, prefix + "-scales"),
-        file.section(elements / 32, prefix + "-biases"),
-        outputSize,
-        inputSize,
-    };
+    // Braced initializers read the sections in file order.
+    return {outputSize, inputSize,
+            ops::AffineWeights{
+                file.section(elements / 2, prefix + "-weights"),
+                file.section(elements / 32, prefix + "-scales"),
+                file.section(elements / 32, prefix + "-biases"),
+            }};
 }
 
-ops::Q8Projection readQ8Projection(WeightFile &file,
-                                   metal::MetalBackend &backend,
-                                   uint32_t outputSize,
-                                   uint32_t inputSize,
-                                   std::string_view label) {
+ops::NormWeights readNorm(WeightFile &file, uint32_t width, bool float32,
+                          std::string_view label) {
+    ops::NormWeights norm{{}, float32};
+    norm.buffer = file.section(norm.bytes(width), label);
+    return norm;
+}
+
+ops::Q8Projection readAffineQ8Projection(WeightFile &file, uint32_t outputSize, uint32_t inputSize,
+                                         std::string_view label) {
     validateQ4Layout(outputSize, inputSize);
     const uint64_t elements = q4Elements(outputSize, inputSize);
-    const uint64_t parameterBytes = elements / 32;
-    metal::MetalBuffer packed =
-        file.section(q8PackedBytes(outputSize, inputSize), label);
-    return {
-        backend.view(packed, 0, elements),
-        backend.view(packed, elements, parameterBytes),
-        backend.view(packed, elements + parameterBytes, parameterBytes),
-        outputSize,
-        inputSize,
-    };
+    const std::vector<metal::MetalBuffer> planes = file.split({elements, elements / 32, elements / 32}, label);
+    return {{planes[0], planes[1], planes[2]}, outputSize, inputSize};
 }
 
-ops::ExpertQ4Projection
-readExpertQ4Projection(WeightFile &file, uint32_t experts,
-                       uint32_t outputSize, uint32_t inputSize,
-                       std::string_view label) {
+ops::ExpertProjection
+readAffineExpertProjection(WeightFile &file, uint32_t experts,
+                           uint32_t outputSize, uint32_t inputSize,
+                           std::string_view label) {
     if (!experts)
         throw WeightStoreError("expert projection requires experts");
     validateQ4Layout(outputSize, inputSize);
