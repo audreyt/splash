@@ -718,28 +718,6 @@ class Frontend:
         response_schema, response_validator = normalize_response_format(
             body.get("response_format")
         )
-        if response_schema is not None:
-            instruction = (
-                "Your final answer must be a JSON value matching the following "
-                "JSON schema, without Markdown fences."
-            )
-            if tools:
-                instruction += (
-                    " You may call tools first when needed. Tool calls use their "
-                    "own argument schemas; this schema applies only to your final answer."
-                )
-            instruction += "\n" + json.dumps(response_schema, separators=(",", ":"))
-            # The template already describes tools. Describe the answer format
-            # too, so the model can choose between a tool and a final answer.
-            index = next(
-                (
-                    i
-                    for i, message in enumerate(messages)
-                    if message["role"] != "system"
-                ),
-                len(messages),
-            )
-            messages.insert(index, {"role": "system", "content": instruction})
         return Prompt(
             messages,
             tools,
