@@ -346,9 +346,10 @@ class BackendRegressionTests(unittest.TestCase):
                         [
                             version,
                             names,
+                            # The candidate keeps the cache of its other steps.
                             str(root / "cache")
-                            if version == "baseline" or identity == "same"
-                            else str(output / "weights"),
+                            if version == "candidate" or identity == "same"
+                            else str(output / "baseline-weights"),
                         ]
                         for version in regression.ROUNDS
                         for names in scenarios

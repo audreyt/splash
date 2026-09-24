@@ -5,10 +5,11 @@ hashes the build's preparation identity (build/engine/
 WeightPreparationIdentity.hpp), so builds of different identities never share
 an entry, and two such builds sharing one cache supersede each other's entries
 at every start (DEVELOPMENT.md, Weight preparation). A comparison therefore
-gives the candidate its own cache when the identities differ and compares
-bytes, not keys: every entry the candidate prepared must hold bytes the
-baseline's cache holds, for the same component and source data when both
-entries record them.
+gives the baseline its own cache when the identities differ, while the
+candidate keeps the cache its other release steps use, and compares bytes,
+not keys: the candidate's cache must hold the bytes of every entry the
+baseline prepared from the installation, for the same component and source
+data when both entries record them.
 """
 
 from __future__ import annotations
@@ -30,6 +31,14 @@ def preparation_identity(build: Path) -> bytes | None:
         return None
 
 
+def baseline_environment(directory: Path) -> dict:
+    """The variable that gives a baseline of another preparation identity
+    its own cache, directory/baseline-weights, created now."""
+    cache = (Path(directory) / "baseline-weights").resolve()
+    cache.mkdir(parents=True, exist_ok=True)
+    return {"SPLASH_WEIGHT_CACHE": str(cache)}
+
+
 def cache_root(environment) -> Path:
     """The weight cache of a process started with environment, as
     PreparedWeights.cpp chooses it."""
@@ -43,7 +52,8 @@ def cache_root(environment) -> Path:
 def entries(root: Path) -> list[dict]:
     """The complete entries of the cache at root: key and sha256 of the
     prepared bytes, plus component, inputs and source when the entry
-    records its provenance (entries of earlier versions do not)."""
+    records its provenance; an entry of an earlier version records only
+    its source."""
     records = []
     try:
         directories = sorted(Path(root).iterdir())
@@ -68,40 +78,58 @@ def entries(root: Path) -> list[dict]:
                 name, _, value = line.partition(" ")
                 if name == field:
                     record[field] = value
+        elif len(lines) == 2:
+            # Earlier versions recorded the source path and the file name.
+            record["source"] = lines[0]
         records.append(record)
     return records
 
 
-def compare(baseline_root: Path, candidate_root: Path, *, required: bool) -> dict:
-    """Whether every entry of the candidate's cache holds bytes that the
-    baseline's cache holds. required: the installation prepares weights, so
-    an empty candidate cache is a failure."""
-    baseline = entries(baseline_root)
+def compare(
+    baseline_root: Path, candidate_root: Path, *, package: Path, required: bool
+) -> dict:
+    """Whether the candidate's cache holds the bytes of every entry that the
+    baseline prepared from package, the model root both builds were given,
+    into its own cache. Entries there of other sources (another model, an
+    earlier revision) are not compared. required: the installation prepares
+    weights, so a baseline that prepared none from package is a failure."""
+    root = str(package)
+    baseline = [
+        record
+        for record in entries(baseline_root)
+        if "source" not in record
+        or record["source"] == root
+        or record["source"].startswith(root + "/")
+    ]
     candidate = entries(candidate_root)
     joined = {
         (record["component"], record["inputs"]): record["sha256"]
-        for record in baseline
+        for record in candidate
         if "component" in record and "inputs" in record
     }
-    digests = {record["sha256"] for record in baseline}
+    digests = {record["sha256"] for record in candidate}
     rows, failures = [], []
-    for record in candidate:
-        expected = joined.get((record.get("component"), record.get("inputs")))
+    for record in baseline:
+        prepared = joined.get((record.get("component"), record.get("inputs")))
         match = (
-            record["sha256"] == expected
-            if expected is not None
+            record["sha256"] == prepared
+            if prepared is not None
             else record["sha256"] in digests
         )
-        rows.append({**record, "baseline_sha256": expected, "match": match})
+        rows.append({**record, "candidate_sha256": prepared, "match": match})
         if not match:
             name = record.get("component", record["key"])
             failures.append(
-                f"{name}: prepared bytes {record['sha256']} differ from the baseline's"
-                if expected is not None
-                else f"{name}: no baseline entry holds prepared bytes {record['sha256']}"
+                f"{name}: the candidate prepared {prepared}, the baseline "
+                f"{record['sha256']}"
+                if prepared is not None
+                else f"{name}: the candidate's cache lacks the baseline's prepared "
+                f"bytes {record['sha256']}"
             )
-    if required and not candidate:
-        failures.append(f"the candidate prepared no weights in {candidate_root}")
+    if required and not baseline:
+        failures.append(
+            f"the baseline prepared no weights from {root} in {baseline_root}"
+        )
     return {
         "baseline_cache": str(baseline_root),
         "candidate_cache": str(candidate_root),

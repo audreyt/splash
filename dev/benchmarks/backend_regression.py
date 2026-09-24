@@ -15,8 +15,10 @@ machine, which must be otherwise idle:
   time of the 14,096-token cold prefill (partial_4k_cold) and the TTFT of its
   partial hit (partial_4k_hit).
 - prepared bytes: when the builds' preparation identities differ, the
-  candidate prepares into its own cache, <output dir>/weights, whose entries
-  must all hold bytes of the baseline's cache (prepared.compare). Equal
+  baseline prepares into its own cache, <output dir>/baseline-weights, and
+  the candidate keeps the cache its other release steps use, so neither
+  re-prepares between steps; the candidate's cache must hold the bytes of
+  every entry the baseline prepared from the model (prepared.compare). Equal
   identities share every entry, which then holds by construction.
 
 The candidate's own benchmark invariants must hold too. The result is
@@ -347,9 +349,7 @@ def main(argv=None) -> int:
     ) == prepared.preparation_identity(trees["candidate"] / "build")
     environments = {"baseline": dict(os.environ), "candidate": dict(os.environ)}
     if not shared:
-        cache = (args.output_dir / "weights").resolve()
-        cache.mkdir(exist_ok=True)
-        environments["candidate"]["SPLASH_WEIGHT_CACHE"] = str(cache)
+        environments["baseline"].update(prepared.baseline_environment(args.output_dir))
     args.combined = all(
         supports_scenario_list(tree / BENCHMARK) for tree in trees.values()
     )
@@ -387,6 +387,7 @@ def main(argv=None) -> int:
                 **prepared.compare(
                     prepared.cache_root(environments["baseline"]),
                     prepared.cache_root(environments["candidate"]),
+                    package=args.package,
                     required=args.kind == smoke.model_artifacts.ASSEMBLY,
                 ),
             }

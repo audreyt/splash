@@ -246,10 +246,11 @@ def main(argv=None):
     ) == prepared_weights.preparation_identity(args.binary.resolve().parent)
     environments = {"baseline": None, "candidate": None}
     if not shared:
-        # Builds of different preparation identities must not share a cache.
-        cache = args.output.parent.resolve() / f"{args.output.stem}-weights"
-        cache.mkdir(parents=True, exist_ok=True)
-        environments["candidate"] = {"SPLASH_WEIGHT_CACHE": str(cache)}
+        # Builds of different preparation identities must not share a cache;
+        # the candidate keeps its own, which its other steps use.
+        environments["baseline"] = prepared_weights.baseline_environment(
+            args.output.parent
+        )
     document = {
         "schema_version": 1,
         "timing": "HTTP/native wall; not GPU time",
@@ -318,8 +319,10 @@ def main(argv=None):
             else {
                 "shared_identity": False,
                 **prepared_weights.compare(
+                    prepared_weights.cache_root(environments["baseline"]),
                     prepared_weights.cache_root(os.environ),
-                    prepared_weights.cache_root(environments["candidate"]),
+                    # The model root RealServer gives both builds.
+                    package=args.package.resolve(),
                     required=args.kind == smoke.model_artifacts.ASSEMBLY,
                 ),
             }
