@@ -116,6 +116,54 @@ NORM_RMS(norm_rms, bfloat)
 NORM_RMS(norm_rms_f32, float)
 #undef NORM_RMS
 
+// Plain norms of few rows of at most 2048 columns (ops/Normalization.cpp)
+// load each row once into threadgroup memory, a vector per thread of a
+// 1024-thread group, and scale it from there instead of reading it from
+// device memory twice as norm_rms does. The reduction is rms_inverse's over
+// the first 256 threads, so the bits match every other norm. In chains of
+// dependent norms with DRAM-cold weights, 2048-column norms of 1 to 64 rows
+// ran x1.3-2.6 faster on a 40-core M3 Max and a 20-core M5 Pro, bf16 and F32
+// weights alike. At 128 rows the M5 Pro's margin is within noise (x1.02), and
+// from 256 rows on norm_rms is faster, by up to 1.3x at 2048 rows, its
+// 256-thread groups overlapping once the rows fill the GPU. Against the
+// register path of 5120-column rows it measured x0.94-1.15 up to 64 rows,
+// within the spread of norm_rms against itself (x0.91-1.04), and lost from
+// 128 rows on, so wider rows keep norm_rms. WV is the weights' vector type:
+// bfloat4, or packed_float4 for a GGUF's F32 norms, which assume no more than
+// scalar alignment.
+static_assert(SPLASH_STAGED_NORM_WIDTH % 4 == 0, "the staged row is a whole number of vectors");
+static_assert(SPLASH_STAGED_NORM_THREADS % 256 == 0, "rms_inverse's 256 threads are whole simdgroups");
+template <class WV>
+inline void norm_rms_staged_row(device const bfloat4 *input, device const WV *weight,
+                                device bfloat4 *output, uint width, uint row, uint tid,
+                                uint lane, uint sg, threadgroup bfloat4 *stage,
+                                threadgroup float *reductions) {
+#pragma clang fp reassociate(off)
+  const uint vectors = width / 4;
+  for (uint column = tid; column < vectors; column += SPLASH_STAGED_NORM_THREADS)
+    stage[column] = input[row * vectors + column];
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  // The first 256 threads reduce the row as rms_inverse does; the other
+  // simdgroups' partials are zero and unread.
+  const float sum = tid < 256 ? row_squares((threadgroup const bfloat *)stage, width, tid) : 0.0f;
+  const float inverse = rms_inverse_of_sums(sum, width, reductions, tid, lane, sg);
+  for (uint column = tid; column < vectors; column += SPLASH_STAGED_NORM_THREADS)
+    output[row * vectors + column] = bfloat4((float4(stage[column]) * inverse) * float4(weight[column]));
+}
+#define NORM_RMS_STAGED(Name, WV) \
+  kernel void Name(device const bfloat4 *input [[buffer(0)]], \
+      device const WV *weight [[buffer(1)]], device bfloat4 *output [[buffer(2)]], \
+      constant uint &width [[buffer(3)]], uint row [[threadgroup_position_in_grid]], \
+      uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], \
+      uint sg [[simdgroup_index_in_threadgroup]]) { \
+    threadgroup bfloat4 stage[SPLASH_STAGED_NORM_WIDTH / 4]; \
+    threadgroup float reductions[SPLASH_STAGED_NORM_THREADS / 32]; \
+    norm_rms_staged_row(input, weight, output, width, row, tid, lane, sg, stage, reductions); \
+  }
+NORM_RMS_STAGED(norm_rms_staged, bfloat4)
+NORM_RMS_STAGED(norm_rms_staged_f32, packed_float4)
+#undef NORM_RMS_STAGED
+
 // Keep the ordinary output for non-matrix consumers, and emit the consumer's
 // matrix operand table (Table: q4sg::Table64 affine, gguf_sg::Table16 GGUF) from
 // the same rounded bfloat values. No additional dispatch is needed. The table
