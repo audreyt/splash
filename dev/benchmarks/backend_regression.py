@@ -108,7 +108,9 @@ def run_round(tree: Path, package: Path, round_index: int, version: str, args, e
         try:
             documents.append(parse_document(finished.stdout, finished.returncode))
         except RegressionError as error:
-            raise RegressionError(f"{stem.name}: {error}") from error
+            log = stem.with_suffix(".log")
+            tail = "".join(log.read_text(errors="replace").splitlines(True)[-3:])
+            raise RegressionError(f"{stem.name}: {error} ({log}):\n{tail}") from error
     return documents
 
 

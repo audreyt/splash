@@ -266,6 +266,60 @@ class BackendRegressionTests(unittest.TestCase):
         script.chmod(0o755)
         return checkout
 
+    @staticmethod
+    def run_main(root: Path) -> int:
+        """main on the fake checkouts under root and a legacy package."""
+        models = root / "models"
+        package = models / "incoai/Qwen3.8-27B-Splash"
+        package.mkdir(parents=True)
+        (package / "manifest.json").write_text("{}")
+        arguments = [
+            "--baseline",
+            str(root / "baseline"),
+            "--candidate",
+            str(root / "candidate"),
+            "--package",
+            str(package),
+            "--output-dir",
+            str(root / "release"),
+        ]
+        with (
+            mock.patch.object(smoke.model_artifacts, "MODELS", models),
+            mock.patch.dict(os.environ, {"SPLASH_WEIGHT_CACHE": str(root / "cache")}),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            return regression.main(arguments)
+
+    def test_a_failed_benchmark_stops_the_comparison_with_its_error(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            self.fake_checkout(root, "baseline", "same", True)
+            candidate = self.fake_checkout(root, "candidate", "same", True)
+            script = candidate / regression.BENCHMARK
+            script.write_text(
+                script.read_text().replace(
+                    "print(json.dumps(document))\n",
+                    "print('backend-benchmark: request failed: boom', file=sys.stderr)\n"
+                    "raise SystemExit(1)\n",
+                )
+            )
+            with self.assertRaisesRegex(
+                regression.RegressionError,
+                r"round-2-candidate-decode-partial: .*without JSON(.|\n)*boom",
+            ):
+                self.run_main(root)
+            document = json.loads(
+                (root / "release/backend-regression.json").read_text()
+            )
+            self.assertFalse(document["pass"])
+            self.assertIn("without JSON", document["error"])
+            # The baseline's first round ran; nothing after the failure did.
+            calls = (root / "calls.jsonl").read_text().splitlines()
+            self.assertEqual(
+                [json.loads(line)[0] for line in calls], ["baseline", "candidate"]
+            )
+
     def test_main_runs_abba_rounds_and_isolates_another_preparation_identity(self):
         for identity, list_support in (("same", True), ("new", True), ("new", False)):
             with (
@@ -273,32 +327,10 @@ class BackendRegressionTests(unittest.TestCase):
                 TemporaryDirectory() as directory,
             ):
                 root = Path(directory).resolve()
-                baseline = self.fake_checkout(root, "baseline", "same", list_support)
-                candidate = self.fake_checkout(root, "candidate", identity, True)
-                models = root / "models"
-                package = models / "incoai/Qwen3.8-27B-Splash"
-                package.mkdir(parents=True)
-                (package / "manifest.json").write_text("{}")
+                self.fake_checkout(root, "baseline", "same", list_support)
+                self.fake_checkout(root, "candidate", identity, True)
                 output = root / "release"
-                arguments = [
-                    "--baseline",
-                    str(baseline),
-                    "--candidate",
-                    str(candidate),
-                    "--package",
-                    str(package),
-                    "--output-dir",
-                    str(output),
-                ]
-                with (
-                    mock.patch.object(smoke.model_artifacts, "MODELS", models),
-                    mock.patch.dict(
-                        os.environ, {"SPLASH_WEIGHT_CACHE": str(root / "cache")}
-                    ),
-                    contextlib.redirect_stdout(io.StringIO()),
-                    contextlib.redirect_stderr(io.StringIO()),
-                ):
-                    self.assertEqual(regression.main(arguments), 0)
+                self.assertEqual(self.run_main(root), 0)
                 calls = [
                     json.loads(line)
                     for line in (root / "calls.jsonl").read_text().splitlines()
