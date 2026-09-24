@@ -13,10 +13,12 @@
 namespace q4sg {
 enum class Epilogue { Affine, Residual, GateUp };
 
-template <Epilogue E>
+// The destination's type Out is bf16, or fp32 for a plain projection's
+// logits (ops::Projection::destination), which keeps the sum unrounded.
+template <Epilogue E, class Out>
 __attribute__((always_inline)) inline void decode(device const bfloat *table, device const uchar *w0,
                    device const bfloat *sc0, device const bfloat *bi0,
-                   device bfloat *out, device const float *sums,
+                   device Out *out, device const float *sums,
                    device coherent(device) float *partials, device atomic_uint *counters,
                    device const bfloat *residual, device const uchar *w1,
                    device const bfloat *sc1, device const bfloat *bi1,
@@ -116,11 +118,12 @@ __attribute__((always_inline)) inline void decode(device const bfloat *table, de
 #pragma unroll
     for (uint nf = 0; nf < 2; ++nf) {
       const uint n = base + nf * 8 + fm;
-      float2 value = float2(bfloat2(acc[nf]));
+      float2 value = acc[nf];
+      if constexpr (!is_same_v<Out, float>) value = float2(bfloat2(value));
       if (E == Epilogue::Residual)
         value += float2(float(residual[fn * N + n]), float(residual[(fn + 1) * N + n]));
-      out[fn * N + n] = bfloat(value.x);
-      out[(fn + 1) * N + n] = bfloat(value.y);
+      out[fn * N + n] = Out(value.x);
+      out[(fn + 1) * N + n] = Out(value.y);
     }
   }
 }
@@ -139,27 +142,34 @@ kernel void decode_linear_q4_prepare(
   q4sg::write_input(table, sums, group, row, lane, input[offset], input[offset + 1]);
 }
 
-#define Q4_SG_INPUTS \
+#define Q4_SG_INPUTS(Out) \
     device const bfloat *table [[buffer(0)]], device const uchar *weights [[buffer(1)]], \
     device const bfloat *scales [[buffer(2)]], device const bfloat *biases [[buffer(3)]], \
-    device bfloat *output [[buffer(4)]], device const float *sums [[buffer(5)]], \
+    device Out *output [[buffer(4)]], device const float *sums [[buffer(5)]], \
     device coherent(device) float *partials [[buffer(6)]], device atomic_uint *counters [[buffer(7)]]
 #define Q4_SG_THREADS \
     uint3 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]], \
     uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]
 
-kernel void decode_linear_q4_sg(Q4_SG_INPUTS, constant Q4Params &p [[buffer(8)]], Q4_SG_THREADS) {
-  threadgroup uint arrival;
-  q4sg::decode<q4sg::Epilogue::Affine>(table, weights, scales, biases, output, sums,
-      partials, counters, output, weights, scales, biases, p, tg, tid, sg, lane, &arrival);
-}
-kernel void decode_linear_q4_sg_residual(Q4_SG_INPUTS,
+// The plain projection into bf16 and into fp32 (_f32: the logits,
+// ops::Projection::destination); the input table stands in for the residual
+// it does not read.
+#define Q4_SG_AFFINE(Name, Out) \
+  kernel void Name(Q4_SG_INPUTS(Out), constant Q4Params &p [[buffer(8)]], Q4_SG_THREADS) { \
+    threadgroup uint arrival; \
+    q4sg::decode<q4sg::Epilogue::Affine>(table, weights, scales, biases, output, sums, partials, \
+        counters, table, weights, scales, biases, p, tg, tid, sg, lane, &arrival); \
+  }
+Q4_SG_AFFINE(decode_linear_q4_sg, bfloat)
+Q4_SG_AFFINE(decode_linear_q4_sg_f32, float)
+#undef Q4_SG_AFFINE
+kernel void decode_linear_q4_sg_residual(Q4_SG_INPUTS(bfloat),
     device const bfloat *residual [[buffer(8)]], constant Q4Params &p [[buffer(9)]], Q4_SG_THREADS) {
   threadgroup uint arrival;
   q4sg::decode<q4sg::Epilogue::Residual>(table, weights, scales, biases, output, sums,
       partials, counters, residual, weights, scales, biases, p, tg, tid, sg, lane, &arrival);
 }
-kernel void decode_linear_q4_sg_gate_up(Q4_SG_INPUTS, device const uchar *up [[buffer(8)]],
+kernel void decode_linear_q4_sg_gate_up(Q4_SG_INPUTS(bfloat), device const uchar *up [[buffer(8)]],
     device const bfloat *upScales [[buffer(9)]], device const bfloat *upBiases [[buffer(10)]],
     constant Q4Params &p [[buffer(11)]], Q4_SG_THREADS) {
   threadgroup uint arrival;

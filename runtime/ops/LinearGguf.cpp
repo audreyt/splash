@@ -246,6 +246,9 @@ void Linear::addGguf(metal::CommandGraph &graph, const LinearBuffers &b,
   requireSegments(p, w.matrix);
   if (gate) requireSegments(*gate, w.matrix);
   const std::vector<QuantizedSegment> &segments = p.blocks().segments;
+  // The fused kernels have no fp32 instance.
+  if (plan.destination() == FloatOutput::Float32 && segments.size() > 1)
+    throw std::invalid_argument("an fp32 destination takes a single-tensor block projection");
   if (std::any_of(segments.begin(), segments.end(), [](const QuantizedSegment &s) { return s.isFloat(); })) {
     // The quantized segments, which precede the float ones, run the plan's tiles.
     addGgufFloatSegments(graph, b, p, plan);
@@ -296,7 +299,7 @@ void Linear::addGgufStaged(metal::CommandGraph &graph, const LinearBuffers &b,
   const metal::MetalBuffer counters = splits > 1 ? b.scratch.counters : b.output;
   const auto tensor = [&](const QuantizedSegment &s, char epilogue, const metal::MetalBuffer &output,
                           const metal::MetalBuffer &aux) {
-    graph.add(decodeKernel(s.name(), rows, epilogue),
+    graph.add(kernelInstance(decodeKernel(s.name(), rows, epilogue), plan.destination()),
               {b.input, s.plane0, s.plane1Slot(), s.meta, output, partials, counters, aux},
               GgufDecodeParams{k, splits, n, s.columnOffset}, {s.outputSize / GGUF_TILE_COLUMNS, splits, 1},
               {GGUF_STAGED_THREADS, 1, 1});
@@ -354,7 +357,7 @@ void Linear::addGgufRegister(metal::CommandGraph &graph, const LinearBuffers &b,
   }
   const auto tensor = [&](const QuantizedSegment &s, char epilogue, const metal::MetalBuffer &output,
                           const metal::MetalBuffer &aux) {
-    graph.add(std::string("gguf_decode_sg_") + s.name() + suffix + "_" + epilogue,
+    graph.add(kernelInstance(std::string("gguf_decode_sg_") + s.name() + suffix + "_" + epilogue, plan.destination()),
               {b.scratch.input, b.scratch.sums, s.plane0, s.plane1Slot(), s.meta, output, b.scratch.partials,
                b.scratch.counters, aux},
               GgufDecodeParams{k, config.splits, n, s.columnOffset}, grid, {GGUF_REGISTER_THREADS, 1, 1});
@@ -370,7 +373,7 @@ void Linear::addGgufFloatSegments(metal::CommandGraph &graph, const LinearBuffer
   if (w.epilogue != LinearEpilogue::None) throw std::invalid_argument("float segments take no epilogue");
   for (const QuantizedSegment &s : p.blocks().segments)
     if (s.isFloat())
-      addGgufFloat(graph, b.input, s, b.output, w.rows, w.matrix.outputSize, s.columnOffset, FloatOutput::BFloat16,
+      addGgufFloat(graph, b.input, s, b.output, w.rows, w.matrix.outputSize, s.columnOffset, plan.destination(),
                    ggufFloatTile(w.rows, s.outputSize));
 }
 
@@ -398,7 +401,7 @@ void addGgufFloat(metal::CommandGraph &graph, metal::MetalBuffer input, const Qu
                   metal::MetalBuffer output, uint32_t rows, uint32_t outStride, uint32_t outOffset,
                   FloatOutput type, FloatTile tile) {
   const uint32_t n = weights.outputSize, k = weights.inputSize;
-  const uint64_t element = type == FloatOutput::Float32 ? sizeof(float) : sizeof(uint16_t);
+  const uint64_t element = elementBytes(type);
   const bool accelerator = tile == FloatTile::NeuralAccelerator;
   if (!weights.isFloat() || !rows || !n || n % 8 || !k || k % 8 || outOffset + uint64_t{n} > outStride ||
       (accelerator && (rows < 16 || k % 32)) || weights.plane0.sizeBytes() < uint64_t{n} * k * sizeof(float) ||
