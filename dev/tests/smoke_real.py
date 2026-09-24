@@ -81,7 +81,9 @@ def stream_request(port: int, path: str, body: dict) -> tuple[int, str, bytes]:
 
 
 class RealServer:
-    def __init__(self, arguments):
+    def __init__(self, arguments, environment: dict | None = None):
+        """A server of arguments.package, its process started with these
+        variables added to this process's environment."""
         package = arguments.package.resolve()
         binary = arguments.binary.resolve()
         self.port = available_port()
@@ -112,6 +114,7 @@ class RealServer:
         self.process = subprocess.Popen(
             command,
             cwd=ROOT,
+            env=None if environment is None else {**os.environ, **environment},
             stdout=self.log,
             stderr=subprocess.STDOUT,
             text=True,
