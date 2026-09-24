@@ -599,6 +599,7 @@ class LauncherTests(unittest.TestCase):
                             {
                                 "id": MODEL_ID,
                                 "owned_by": "splash",
+                                "input_modalities": ["text", "image", "pdf"],
                             }
                         ]
                     }
