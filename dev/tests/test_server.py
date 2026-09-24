@@ -515,6 +515,35 @@ class PassThroughConstraintFactory:
         return {}
 
 
+def main_args(**overrides):
+    """Parsed command-line arguments for main() tests."""
+    return SimpleNamespace(
+        **{
+            "target": "target",
+            "draft": "draft",
+            "tokenizer": "tokenizer",
+            "model": "test-model",
+            "served_model_name": [],
+            "default_reasoning_effort": None,
+            "max_context": None,
+            "max_memory": None,
+            "max_image_pixels": api.image_input.MAX_PIXELS,
+            "max_new_tokens": 16,
+            "request_timeout": 2,
+            "queue_size": 1,
+            "host": "127.0.0.1",
+            "allowed_host": [],
+            "api_key": None,
+            "no_webui": False,
+            "max_request_size": api.DEFAULT_MAX_REQUEST_BYTES,
+            "port": 0,
+            "binary": "splash",
+            "kv_format": "int8",
+            **overrides,
+        }
+    )
+
+
 def make_frontend(
     tokenizer, *args, constraint_factory=None, thinking_codec=None, **options
 ):
@@ -3143,28 +3172,7 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(response["created_at"], 123)
 
     def test_sigterm_uses_the_normal_main_cleanup_path(self):
-        args = SimpleNamespace(
-            target="target",
-            served_model_name=[],
-            default_reasoning_effort=None,
-            draft="draft",
-            tokenizer="tokenizer",
-            model="test-model",
-            max_context=None,
-            max_memory=None,
-            max_image_pixels=api.image_input.MAX_PIXELS,
-            max_new_tokens=16,
-            request_timeout=2,
-            queue_size=1,
-            host="127.0.0.1",
-            allowed_host=[],
-            api_key=None,
-            no_webui=False,
-            max_request_size=api.DEFAULT_MAX_REQUEST_BYTES,
-            port=0,
-            binary="splash",
-            kv_format="int8",
-        )
+        args = main_args()
         runtime = mock.Mock()
         runtime.readiness = native_wire.ReadyEvent(
             engine_instance_id=1,
@@ -3247,27 +3255,7 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(order, ["bind", "runtime"])
 
     def test_main_cleans_up_when_native_startup_fails_after_reserved_bind(self):
-        args = SimpleNamespace(
-            target="target",
-            served_model_name=[],
-            default_reasoning_effort=None,
-            draft="draft",
-            tokenizer="tokenizer",
-            model="test-model",
-            max_context=128,
-            max_memory=32 * 1024**3,
-            max_new_tokens=16,
-            request_timeout=2,
-            queue_size=1,
-            host="127.0.0.1",
-            allowed_host=[],
-            api_key=None,
-            no_webui=False,
-            max_request_size=api.DEFAULT_MAX_REQUEST_BYTES,
-            port=0,
-            binary="splash",
-            kv_format="int8",
-        )
+        args = main_args(max_context=128, max_memory=32 * 1024**3)
         runtime = mock.Mock()
         runtime.wait_ready.side_effect = api.engine_runtime.EngineUnhealthy("late")
         backend = mock.Mock()
@@ -3296,28 +3284,7 @@ class ServerTest(unittest.TestCase):
         self.assertIn("Error · late", stderr.getvalue())
 
     def test_main_rejects_port_conflict_before_loading_or_starting_native(self):
-        args = SimpleNamespace(
-            target="target",
-            served_model_name=[],
-            default_reasoning_effort=None,
-            draft="draft",
-            tokenizer="tokenizer",
-            model="test-model",
-            max_context=None,
-            max_memory=None,
-            max_image_pixels=api.image_input.MAX_PIXELS,
-            max_new_tokens=16,
-            request_timeout=2,
-            queue_size=1,
-            host="127.0.0.1",
-            allowed_host=[],
-            api_key=None,
-            no_webui=False,
-            max_request_size=api.DEFAULT_MAX_REQUEST_BYTES,
-            port=8000,
-            binary="splash",
-            kv_format="int8",
-        )
+        args = main_args(port=8000)
         server = mock.Mock()
         server.server_bind.side_effect = OSError(48, "Address already in use")
         with (
