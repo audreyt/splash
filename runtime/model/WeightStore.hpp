@@ -1,6 +1,7 @@
 #pragma once
 
 #include "metal/MetalBackend.hpp"
+#include "model/WeightLayout.hpp"
 #include "ops/Linear.hpp"
 #include "ops/Normalization.hpp"
 
@@ -16,12 +17,6 @@
 
 namespace splash::model {
 
-inline constexpr uint32_t kQ4GroupElements = 64;
-inline constexpr uint64_t kBFloat16Bytes = 2;
-
-inline constexpr uint64_t kWeightFileAlignment = 16 * 1024;
-inline constexpr uint32_t kQ4StorageN = 256;
-
 class WeightStoreError : public std::runtime_error {
 public:
   using std::runtime_error::runtime_error;
@@ -33,6 +28,7 @@ struct WeightFileRecord final {
   uint32_t layer = 0;
   uint32_t type = 0;
   uint64_t declaredBytes = 0;
+  std::string contentIdentity{};
 };
 
 // A read-only mmap with one no-copy Metal base buffer.  Sections are checked,
@@ -41,11 +37,14 @@ class WeightFile final {
 public:
   WeightFile(metal::MetalBackend &backend, std::filesystem::path path,
              std::string relativePath, std::string_view expectedMagic,
-             uint32_t expectedLayer, uint32_t expectedType);
+             uint32_t expectedLayer, uint32_t expectedType,
+             std::string contentIdentity = {});
   ~WeightFile();
 
   WeightFile(const WeightFile &) = delete;
   WeightFile &operator=(const WeightFile &) = delete;
+  WeightFile(WeightFile &&) noexcept;
+  WeightFile &operator=(WeightFile &&) noexcept;
 
   [[nodiscard]] metal::MetalBuffer section(uint64_t bytes,
                                             std::string_view label = {});
@@ -74,6 +73,19 @@ readAffineProjection(WeightFile &file, uint32_t outputSize, uint32_t inputSize,
 // norms as the GGUF stores them), bf16 otherwise.
 [[nodiscard]] ops::NormWeights readNorm(WeightFile &file, uint32_t width,
                                         bool float32, std::string_view label);
+
+// GGUF image sections: a 64-byte descriptor, then plane0, optional plane1
+// and metadata, each 16 KiB aligned (GgufTensorDescriptor and the layout in
+// model/GgufImageLayout.hpp).
+[[nodiscard]] ops::QuantizedSegment readQuantizedSegment(WeightFile &file,
+                                                   std::string_view label);
+// A single-tensor projection; its descriptor must hold the layout's sizes.
+[[nodiscard]] ops::Projection readBlockProjection(WeightFile &file, uint32_t outputSize,
+                                                  uint32_t inputSize, std::string_view label);
+// Native block_q4_K, block_q6_K or block_q8_0 rows for the token table
+// (gathered, never multiplied).
+[[nodiscard]] ops::EmbeddingWeights readBlockEmbedding(WeightFile &file, uint32_t outputSize,
+                                                       uint32_t inputSize, std::string_view label);
 
 // Embedding weights, scales and biases are independently aligned sections
 // so token gather can bind each table directly.
