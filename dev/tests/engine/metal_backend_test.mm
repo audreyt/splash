@@ -382,6 +382,115 @@ void pendingCommandStillTimesOut(const std::string &metallibPath) {
     std::cout << "PASS pending GPU command watchdog and resource lifetime\n";
 }
 
+// Kept buffers stay held until the keep-alive passes without a command, the
+// next command holds them again at once, and a buffer's last view takes it
+// out of the set.
+void keptBuffersStayResident(const std::string &metallibPath) {
+    constexpr double kKeepAliveSeconds = 1.0;
+    MetalBackend backend(metallibPath, 120.0, 30000, kKeepAliveSeconds);
+    const uint64_t page = static_cast<uint64_t>(getpagesize());
+    MetalBuffer dropped = backend.allocateBuffer(page);
+    MetalBuffer used = backend.allocateBuffer(page);
+    const uint64_t each = backend.memoryStats().allocatedBytes / 2;
+    const auto start = std::chrono::steady_clock::now();
+    backend.keepResident(backend.view(dropped, 0, 64));
+    backend.keepResident(used);
+    require(backend.lapsedResidentBytes() == 0, "kept buffers were not held at once");
+    requireBackendError([&] { backend.keepResident(dropped); },
+                        "the base of a kept view was kept again");
+    while (!backend.lapsedResidentBytes() &&
+           std::chrono::steady_clock::now() - start < std::chrono::seconds(5))
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    const std::chrono::duration<double> lapsedAfter = std::chrono::steady_clock::now() - start;
+    require(backend.lapsedResidentBytes() == 2 * each &&
+                lapsedAfter.count() >= kKeepAliveSeconds,
+            "kept buffers did not lapse once the keep-alive passed without a command");
+    dropped = {};
+    require(backend.lapsedResidentBytes() == each,
+            "a buffer whose last view is gone is still kept");
+    const uint32_t count = 1, increment = 7;
+    *static_cast<uint32_t *>(used.contents()) = 0;
+    ComputeDispatch dispatch{"test_add_u32", {{0, used}},
+        {{1, &count, sizeof(count)}, {2, &increment, sizeof(increment)}},
+        {1, 1, 1}, {1, 1, 1}};
+    auto ticket = backend.submitAsync(dispatch);
+    require(backend.lapsedResidentBytes() == 0,
+            "a command did not hold the kept buffers again");
+    (void)ticket.wait();
+    require(*static_cast<uint32_t *>(used.contents()) == increment,
+            "a command on a kept buffer produced the wrong result");
+    std::cout << "PASS kept buffers stay resident keep_alive_seconds=" << kKeepAliveSeconds
+              << " lapsed_after_seconds=" << lapsedAfter.count() << '\n';
+}
+
+// Keeping, lapsing and holding again race the heartbeat while another thread
+// drops kept buffers, as command completion can, and the backend is then
+// destroyed with its heartbeat live and a kept buffer outliving it. Nothing
+// may block, and every command must see its buffer.
+void residencyRacesTheHeartbeat(const std::string &metallibPath) {
+    constexpr double kKeepAliveSeconds = 0.05;
+    constexpr int kRounds = 24;
+    auto backend = std::make_unique<MetalBackend>(metallibPath, 120.0, 30000,
+                                                  kKeepAliveSeconds);
+    const uint64_t page = static_cast<uint64_t>(getpagesize());
+    MetalBuffer used = backend->allocateBuffer(page);
+    backend->keepResident(used);
+    *static_cast<uint32_t *>(used.contents()) = 0;
+    std::mutex mutex;
+    std::condition_variable ready;
+    std::vector<MetalBuffer> handed;
+    bool finished = false;
+    std::thread dropper([&] {
+        std::unique_lock lock(mutex);
+        while (!finished || !handed.empty()) {
+            ready.wait(lock, [&] { return finished || !handed.empty(); });
+            std::vector<MetalBuffer> drop = std::move(handed);
+            handed.clear();
+            lock.unlock();
+            drop.clear();
+            lock.lock();
+        }
+    });
+    const uint32_t count = 1, increment = 1;
+    ComputeDispatch dispatch{"test_add_u32", {{0, used}},
+        {{1, &count, sizeof(count)}, {2, &increment, sizeof(increment)}},
+        {1, 1, 1}, {1, 1, 1}};
+    int lapses = 0;
+    for (int round = 0; round < kRounds; ++round) {
+        MetalBuffer kept = backend->allocateBuffer(page);
+        backend->keepResident(kept);
+        {
+            std::lock_guard lock(mutex);
+            handed.push_back(std::move(kept));
+        }
+        ready.notify_one();
+        // Every third round lets the heartbeat end residency, so that its
+        // command holds the set again.
+        if (round % 3 == 2) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            while (!backend->lapsedResidentBytes() &&
+                   std::chrono::steady_clock::now() < deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            lapses += backend->lapsedResidentBytes() != 0;
+        }
+        (void)backend->submitAsync(dispatch).wait();
+    }
+    {
+        std::lock_guard lock(mutex);
+        finished = true;
+    }
+    ready.notify_one();
+    dropper.join();
+    require(*static_cast<uint32_t *>(used.contents()) == kRounds,
+            "a command racing the residency heartbeat produced the wrong result");
+    require(lapses == kRounds / 3, "residency did not lapse between the racing commands");
+    (void)backend->submitAsync(dispatch).wait();
+    backend.reset();
+    used = {};
+    std::cout << "PASS residency races the heartbeat rounds=" << kRounds
+              << " lapses=" << lapses << '\n';
+}
+
 id<MTLSharedEvent> submissionGate = nil;
 id<MTLSharedEvent> delayedMappingEvent = nil;
 IMP originalSparseSignal = nullptr;
@@ -1326,6 +1435,8 @@ int main(int argc, const char *argv[]) {
             terminalCommandRecovers(argv[1], false, true);
             terminalCommandRecovers(argv[1], true);
             pendingCommandStillTimesOut(argv[1]);
+            keptBuffersStayResident(argv[1]);
+            residencyRacesTheHeartbeat(argv[1]);
             run(argv[1]);
         } catch (const std::exception &error) {
             std::cerr << "FAIL: unexpected exception: " << error.what()
