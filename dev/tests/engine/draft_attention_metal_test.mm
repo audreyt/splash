@@ -157,12 +157,19 @@ void runCase(MetalBackend &backend, uint32_t lanes, DraftAttentionShape shape,
       random, "draft queries");
   std::vector<MetalBuffer> keys;
   std::vector<MetalBuffer> values;
+  // Each tensor follows the last head's ring with one 128-token tile of bf16
+  // NaN. Shader validation does not see the MPP loads of a tile that reads
+  // past the ring, but a masked NaN value still reaches its row as
+  // 0 x NaN, which the finiteness check below rejects.
+  const uint64_t tailElements = uint64_t{128} * kHeadDim;
   for (uint32_t lane = 0; lane < kLanes; ++lane) {
-    // Each tensor ends exactly at the last head's ring, so a tile that reads
-    // past the ring reads past the allocation.
-    keys.push_back(randomBfloat(backend, ringElements, random, "draft keys"));
-    values.push_back(
-        randomBfloat(backend, ringElements, random, "draft values"));
+    keys.push_back(randomBfloat(backend, ringElements + tailElements, random,
+                                "draft keys"));
+    values.push_back(randomBfloat(backend, ringElements + tailElements, random,
+                                  "draft values"));
+    for (const MetalBuffer &tensor : {keys.back(), values.back()})
+      std::fill_n(static_cast<uint16_t *>(tensor.contents()) + ringElements,
+                  tailElements, uint16_t{0x7FC0});
   }
   MetalBuffer queryKeys = randomBfloat(
       backend, uint64_t{lanes} * kKvHeads * kRows * kHeadDim, random,
@@ -203,8 +210,8 @@ void runCase(MetalBackend &backend, uint32_t lanes, DraftAttentionShape shape,
   const auto *output = static_cast<const uint16_t *>(queries.contents());
   std::vector<float> reference(uint64_t{kGroupRows} * kHeadDim);
   for (uint32_t lane = 0; lane < lanes; ++lane) {
-    // Reference the first and final head; all eight execute above, ending
-    // exactly at each lane's allocation boundary under shader validation.
+    // Reference the first and final head, whose ring the NaN tile follows;
+    // all eight execute above.
     for (const uint32_t head : {0U, kKvHeads - 1}) {
       const uint64_t queryOffset =
           uint64_t{lane} * kRows * kAttention + uint64_t{head} * kGroupRows *
