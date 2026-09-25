@@ -671,9 +671,9 @@ void testSyntheticPackage(MetalBackend &backend,
     target.vocabularySize = 256;
     target.packedGdnWidth = 256;
     target.packedFullWidth = 256;
-    target.convolutionDimension = 256;
+    target.convolutionDimension = 192;
     target.gdnKeyHeads = 1;
-    target.gdnValueHeads = 2;
+    target.gdnValueHeads = 1;
     target.gdnHeadDimension = 64;
     target.attentionWidth = 64;
     target.intermediateSize = 256;

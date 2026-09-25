@@ -59,7 +59,7 @@ Sampling::Sampling(metal::MetalBackend &backend, uint32_t vocabulary,
                    uint32_t rowsPerLane)
     : backend_(backend), vocabulary_(vocabulary), rowsPerLane_(rowsPerLane),
       maskWords_((vocabulary + 31) / 32) {
-  if (!vocabulary || !rowsPerLane)
+  if (!vocabulary || rowsPerLane != SPLASH_TARGET_VERIFY_ROWS)
     throw std::invalid_argument("invalid sampling geometry");
 }
 
@@ -176,7 +176,8 @@ void Sampling::addDraftSelector(
     std::span<const uint32_t> anchors,
     std::span<const SamplingPolicy> policies, uint32_t proposalTokens) const {
   if (anchors.empty() || anchors.size() != policies.size() ||
-      anchors.size() > kMaximumLanes || !proposalTokens)
+      anchors.size() > kMaximumLanes ||
+      proposalTokens != SPLASH_DRAFT_PROPOSAL_TOKENS)
     throw std::invalid_argument("invalid draft selector batch");
   const uint32_t lanes = static_cast<uint32_t>(anchors.size());
   SelectorBatchParams params{};

@@ -461,10 +461,14 @@ void invalidRequests(MetalBackend &backend) {
   rejects([&] {
     sampling.addDraftSelector(graph, buffers, anchors, policies, kPositions);
   });
-  rejects([&] {
-    sampling.addDraftSelector(graph, buffers, std::span(anchors).first(1),
-                              policies, 0);
-  });
+  // The kernels compile the proposal count and a lane's rows in.
+  for (const uint32_t proposals : {0U, kPositions - 1, kPositions + 1})
+    rejects([&] {
+      sampling.addDraftSelector(graph, buffers, std::span(anchors).first(1),
+                                policies, proposals);
+    });
+  for (const uint32_t rows : {0U, kRows - 1, kRows + 1})
+    rejects([&] { (void)Sampling(backend, 1024, rows); });
   require(graph.empty(), "invalid draft selector request encoded a graph");
 }
 

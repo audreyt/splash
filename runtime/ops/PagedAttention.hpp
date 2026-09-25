@@ -37,10 +37,10 @@ inline constexpr uint32_t kQ8VerifyPagesPerSplit =
 static_assert(kQ8VerifySplits >= 1 && kQ8VerifySplits <= kQ8VerifyMaximumSplits);
 static_assert(kQ8VerifyPagesPerSplit >= 1);
 
-// One lane's verify split count: never fewer than the configured base, one
-// more split per kQ8VerifyPagesPerSplit visible pages, never more than the
-// maximum the partial workspace is sized for. It depends only on the lane's
-// own history, so batching never changes a lane's arithmetic.
+// One lane's verify split count: one split per kQ8VerifyPagesPerSplit
+// visible pages, never fewer than the configured base and never more than
+// the maximum the partial workspace is sized for. It depends only on the
+// lane's own history, so batching never changes a lane's arithmetic.
 [[nodiscard]] constexpr uint32_t
 q8VerifyAttentionSplits(uint32_t baseSplits, uint32_t committedTokens,
                         uint32_t activeRows) noexcept {

@@ -6,7 +6,6 @@
 #include "Qwen3_8.hpp"
 #include "ops/Vision.hpp"
 
-#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -34,9 +33,6 @@ struct ModelDescriptor final {
   ModelCapabilities capabilities;
   kv::Layout targetKvLayout;
   CompositeStateLayout stateLayout;
-  // Exact bytes parsed during package inspection, including artifact digests.
-  // Synthetic descriptors retain zero; this is separate from layout identity.
-  std::array<uint8_t, 32> packageManifestSha256{};
   // Container selection belongs to loading; runtime dispatch follows each weight.
   TargetSource targetSource = TargetSource::Packed;
   DraftSource draftSource = DraftSource::Packed;

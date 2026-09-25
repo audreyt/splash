@@ -1,4 +1,5 @@
 #include "model/ModelFactory.hpp"
+#include "model/QwenTargetLoader.hpp"
 #include "model/RuntimeArenas.hpp"
 
 #include "metal/abi/QuantFormat.h"
@@ -212,11 +213,42 @@ void checkUnsizedProjection() {
   require(rejected, "a target projection without sizes reached arena sizing");
 }
 
+// The GDN value rows are sized with attentionWidth, so a layout whose value
+// heads span another width is refused before loading and at arena sizing.
+// The packed GDN rows must also hold the two gates of every value head.
+void checkGdnWidths() {
+  const auto sparse = package<model::Qwen3_6MoeWeights>();
+  const auto layoutRejected = [](const model::Qwen3_6MoeLayout &layout) {
+    try { model::requireQwenLayout(layout); }
+    catch (const model::WeightStoreError &) { return true; }
+    return false;
+  };
+  const auto geometryRejected = [&](const model::Qwen3_6MoeLayout &layout) {
+    auto broken = sparse;
+    std::get<model::Qwen3_6MoeWeights>(broken.target).layout = layout;
+    try { static_cast<void>(model::RuntimeGeometry::from(broken)); }
+    catch (const std::invalid_argument &) { return true; }
+    return false;
+  };
+  const model::Qwen3_6MoeLayout shipped;
+  require(!layoutRejected(shipped) && !geometryRejected(shipped),
+          "the shipped sparse layout was refused");
+  auto narrowValues = shipped;
+  narrowValues.gdnValueHeads = narrowValues.gdnKeyHeads;
+  narrowValues.convolutionDimension = 3 * narrowValues.gdnKeyHeads * narrowValues.gdnHeadDimension;
+  require(layoutRejected(narrowValues) && geometryRejected(narrowValues),
+          "a GDN value width other than attentionWidth was accepted");
+  auto withoutGates = shipped;
+  withoutGates.packedGdnWidth = shipped.convolutionDimension + shipped.attentionWidth;
+  require(geometryRejected(withoutGates), "packed GDN rows without the gates reached arena sizing");
+}
+
 } // namespace
 
 int main() {
   try {
     checkUnsizedProjection();
+    checkGdnWidths();
     checkMixedLayouts();
     const auto dense = package<model::Qwen3_8Weights>();
     const auto sparse = package<model::Qwen3_6MoeWeights>();

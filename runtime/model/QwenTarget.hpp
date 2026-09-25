@@ -151,7 +151,9 @@ struct QwenTargetGeometry final {
            captureLayerCount && captureLayerCount <= maximumCaptureLayers &&
            kvLayout.valid() && stateLayout.valid() &&
            stateLayout.layers + kvLayout.attentionLayers == layers &&
-           gdnKeyWidth() * 2 + attentionWidth <= packedGdnWidth &&
+           gdnShape().valid() &&
+           // The GDN value rows are sized with attentionWidth throughout.
+           gdnValueHeads * gdnHeadDimension == attentionWidth &&
            attentionWidth == attentionQueryHeads * attentionHeadDimension &&
            kvLayout.kvHeads == attentionKvHeads &&
            kvLayout.headDimension == attentionHeadDimension &&
@@ -291,7 +293,8 @@ public:
   // stale activations and write results no active row reads.
   [[nodiscard]] uint32_t decodeStorageLanes(uint32_t lanes) const;
 
-  void addPrefill(
+  // Returns the hidden buffer that holds the last layer's output rows.
+  [[nodiscard]] metal::MetalBuffer addPrefill(
       metal::CommandGraph &graph, QwenTargetPrefillBuffers buffers,
       std::span<const QwenTargetPrefillSequence> sequences, uint32_t rows,
       std::span<const kv::LayerStorage> kvLayers) const;

@@ -151,6 +151,9 @@ public:
                                      uint32_t keepRings) noexcept override;
   [[nodiscard]] uint32_t idleCells() const noexcept;
   [[nodiscard]] uint32_t idleRings() const noexcept;
+  // What activating a slot allocates: the GDN cells and the draft ring the
+  // idle pool lacks, since a slot takes pooled buffers first.
+  [[nodiscard]] uint64_t activationBytes() const noexcept;
 
   // Hot-path metadata operations; neither performs a buffer copy.
   void updateLengths(uint32_t slot, QwenLogicalLengths lengths);

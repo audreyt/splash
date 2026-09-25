@@ -2,7 +2,6 @@
 
 #include "metal/DeviceCapabilities.hpp"
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -116,6 +115,9 @@ private:
   friend class MetalBackend;
 };
 
+// Tiles [bufferOffsetBytes, bufferOffsetBytes + sizeBytes) of a
+// placement-sparse buffer, never a view with an offset, backed from
+// heapOffsetBytes of a placement heap.
 struct SparseMapping {
   MetalBuffer buffer;
   uint64_t bufferOffsetBytes = 0;
@@ -261,8 +263,11 @@ private:
 // Permits exactly one submitted-but-not-applied command on its command queue.
 class MetalBackend final {
 public:
+  // A sparse map a command waits for, or an unmap, still pending after
+  // sparseTimeoutMilliseconds fails the command or the backend.
   explicit MetalBackend(std::string metallibPath,
-                        double commandTimeoutSeconds = 120.0);
+                        double commandTimeoutSeconds = 120.0,
+                        uint32_t sparseTimeoutMilliseconds = 30000);
   ~MetalBackend();
   // Invoked before allocations and submissions; may throw to stop bootstrap.
   void setOperationGuard(std::function<void()> guard);
@@ -277,9 +282,6 @@ public:
   MetalBackend &operator=(MetalBackend &&) noexcept;
 
   [[nodiscard]] const DeviceCapabilities &capabilities() const noexcept;
-  // Digest of the immutable bytes used to create this backend's library,
-  // independent of later replacement or removal of its original file path.
-  [[nodiscard]] const std::array<uint8_t, 32> &metallibSha256() const noexcept;
 
   [[nodiscard]] MetalBuffer
   allocateBuffer(uint64_t bytes, BufferStorage storage = BufferStorage::Shared,

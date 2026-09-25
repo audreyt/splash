@@ -6,7 +6,6 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
-#include <CommonCrypto/CommonDigest.h>
 #include <IOKit/IOKitLib.h>
 #include <dispatch/dispatch.h>
 
@@ -19,6 +18,8 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -106,8 +107,8 @@ bool multiplyOverflows(uint64_t left, uint64_t right) {
 
 constexpr uint64_t kPlacementSparsePageBytes = MetalBackend::kPlacementSparsePageBytes;
 constexpr MTLSparsePageSize kPlacementSparsePageSize = MTLSparsePageSize64;
-constexpr NSUInteger kSparseUnmapTimeoutMilliseconds = 30000;
-constexpr NSUInteger kSparseMapTimeoutMilliseconds = 30000;
+// Entries of a kernel's buffer argument table on every Apple GPU family.
+constexpr uint32_t kBufferArgumentEntries = 31;
 
 MTLSparsePageSize metalSparsePageSize(uint64_t bytes) {
     if (bytes != kPlacementSparsePageBytes) {
@@ -141,6 +142,14 @@ void raisePeak(std::atomic<T> &peak, T value) noexcept {
            !peak.compare_exchange_weak(current, value,
                                        std::memory_order_relaxed)) {}
 }
+
+// Hashes pipeline names as views, so a cache lookup builds no string.
+struct PipelineNameHash {
+    using is_transparent = void;
+    size_t operator()(std::string_view name) const noexcept {
+        return std::hash<std::string_view>{}(name);
+    }
+};
 
 NSString *checkedNSString(std::string_view value, std::string_view field) {
     NSString *result = [[NSString alloc]
@@ -440,11 +449,14 @@ struct MetalBackend::Impl {
     __strong id<MTL4CommandQueue> sparseQueue = nil;
     __strong id<MTLSharedEvent> sparseEvent = nil;
     __strong id<MTLLibrary> library = nil;
-    __strong NSMutableDictionary<NSString *, id<MTLComputePipelineState>>
-        *pipelines = nil;
+    // Looked up for every dispatch on the encode path, which the GPU waits
+    // for; a hit allocates nothing.
+    std::unordered_map<std::string, id<MTLComputePipelineState>,
+                       PipelineNameHash, std::equal_to<>>
+        pipelines;
 
     DeviceCapabilities capabilities;
-    std::array<uint8_t, 32> metallibSha256{};
+    NSUInteger sparseTimeoutMilliseconds = 0;
     std::shared_ptr<AllocationAccounting> accounting =
         std::make_shared<AllocationAccounting>();
     std::shared_ptr<BackendAsyncState> asyncState =
@@ -502,13 +514,13 @@ struct MetalBackend::Impl {
     void awaitSparseUnmapLocked() {
         if (!pendingUnmap) return;
         if (![sparseEvent waitUntilSignaledValue:pendingUnmap->eventValue
-                                       timeoutMS:kSparseUnmapTimeoutMilliseconds]) {
+                                       timeoutMS:sparseTimeoutMilliseconds]) {
             std::ostringstream details;
             details << "sparse unmapping timed out: event="
                     << pendingUnmap->eventValue
                     << " signaled=" << sparseEvent.signaledValue
                     << " pending_map=" << pendingSparseEventValue
-                    << " waited_ms=" << kSparseUnmapTimeoutMilliseconds;
+                    << " waited_ms=" << sparseTimeoutMilliseconds;
             std::string message = details.str();
             markUnhealthy(message);
             throw MetalBackendError(message);
@@ -556,10 +568,10 @@ struct MetalBackend::Impl {
         if (name.empty()) {
             throw MetalBackendError("Metal pipeline name must not be empty");
         }
-        NSString *key = checkedNSString(name, "pipeline name");
-        id<MTLComputePipelineState> cached = [pipelines objectForKey:key];
-        if (cached) return cached;
+        if (const auto cached = pipelines.find(name); cached != pipelines.end())
+            return cached->second;
 
+        NSString *key = checkedNSString(name, "pipeline name");
         id<MTLFunction> function = [library newFunctionWithName:key];
         if (!function) {
             throw MetalBackendError(
@@ -573,7 +585,7 @@ struct MetalBackend::Impl {
                 "unable to create Metal pipeline " + std::string(name) +
                 ": " + errorDescription(error));
         }
-        [pipelines setObject:result forKey:key];
+        pipelines.emplace(name, result);
         sampleDeviceMemory();
         return result;
     }
@@ -683,9 +695,14 @@ CommandTiming CommandTicket::wait() {
     return timing;
 }
 
-MetalBackend::MetalBackend(std::string metallibPath, double commandTimeoutSeconds)
+MetalBackend::MetalBackend(std::string metallibPath, double commandTimeoutSeconds,
+                           uint32_t sparseTimeoutMilliseconds)
     : impl_(std::make_unique<Impl>()) {
     impl_->asyncState->commandWatchdog = CommandWatchdog(commandTimeoutSeconds);
+    if (!sparseTimeoutMilliseconds) {
+        throw MetalBackendError("sparse mapping timeout must be positive");
+    }
+    impl_->sparseTimeoutMilliseconds = sparseTimeoutMilliseconds;
     @autoreleasepool {
         if (metallibPath.empty()) {
             throw MetalBackendError("metallib path must not be empty");
@@ -728,37 +745,17 @@ MetalBackend::MetalBackend(std::string metallibPath, double commandTimeoutSecond
                 "unable to read metallib " + metallibPath + ": " +
                 errorDescription(error));
         }
-        if (!fileData.length ||
-            fileData.length > std::numeric_limits<CC_LONG>::max()) {
-            throw MetalBackendError("metallib is empty or too large to hash: " +
-                                    metallibPath);
-        }
-        // DEFAULT copies into immutable dispatch-owned storage. Hash the same
-        // contiguous data passed to Metal, never a second read of the path.
+        // The library keeps the bytes read here, whatever later replaces the
+        // path; the dispatch data retains them rather than copying them.
         dispatch_data_t data = dispatch_data_create(
-            fileData.bytes, fileData.length, nullptr,
-            DISPATCH_DATA_DESTRUCTOR_DEFAULT);
-        if (!data)
-            throw MetalBackendError("unable to copy metallib data: " + metallibPath);
-        const void *bytes = nullptr;
-        size_t byteCount = 0;
-        dispatch_data_t mapped = dispatch_data_create_map(data, &bytes, &byteCount);
-        if (!mapped || !bytes || byteCount != fileData.length ||
-            !CC_SHA256(bytes, static_cast<CC_LONG>(byteCount),
-                       impl_->metallibSha256.data())) {
-            throw MetalBackendError("unable to hash metallib data: " + metallibPath);
-        }
+            fileData.bytes, fileData.length, nullptr, ^{ (void)fileData; });
         error = nil;
         impl_->library =
-            [impl_->device newLibraryWithData:mapped error:&error];
+            [impl_->device newLibraryWithData:data error:&error];
         if (!impl_->library) {
             throw MetalBackendError(
                 "unable to load metallib " + metallibPath + ": " +
                 errorDescription(error));
-        }
-        impl_->pipelines = [NSMutableDictionary dictionary];
-        if (!impl_->pipelines) {
-            throw MetalBackendError("unable to create Metal pipeline cache");
         }
         impl_->sampleDeviceMemory();
 
@@ -886,10 +883,6 @@ const DeviceCapabilities &MetalBackend::capabilities() const noexcept {
     return impl_->capabilities;
 }
 
-const std::array<uint8_t, 32> &MetalBackend::metallibSha256() const noexcept {
-    return impl_->metallibSha256;
-}
-
 void MetalBackend::checkOperation() const {
     impl_->ensureHealthy();
     if (impl_->operationGuard) impl_->operationGuard();
@@ -1014,11 +1007,13 @@ void MetalBackend::mapSparse(
     static_cast<void>(impl_->reapSparseUnmapsLocked());
     const uint64_t tileBytes = kPlacementSparsePageBytes;
     for (const SparseMapping &mapping : mappings) {
+        // Tiles are counted from the start of the buffer, not of a view.
         if (!mapping.buffer.impl_ ||
             !mapping.buffer.impl_->allocation ||
             mapping.buffer.impl_->allocation->accounting.get() !=
                 impl_->accounting.get() ||
-            !mapping.buffer.impl_->allocation->placementSparse) {
+            !mapping.buffer.impl_->allocation->placementSparse ||
+            mapping.buffer.impl_->offsetBytes) {
             throw MetalBackendError("invalid placement-sparse buffer");
         }
         if (!mapping.sizeBytes ||
@@ -1102,6 +1097,7 @@ void MetalBackend::unmapSparse(
             mapping.buffer.impl_->allocation->accounting.get() !=
                 impl_->accounting.get() ||
             !mapping.buffer.impl_->allocation->placementSparse ||
+            mapping.buffer.impl_->offsetBytes ||
             !mapping.sizeBytes ||
             mapping.bufferOffsetBytes % tileBytes ||
             mapping.sizeBytes % tileBytes ||
@@ -1173,11 +1169,11 @@ bool MetalBackend::sparseUnmapPending() noexcept {
     const double now = std::chrono::duration<double>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     if (issued > 0.0 &&
-        (now - issued) * 1000.0 > double(kSparseUnmapTimeoutMilliseconds)) {
+        (now - issued) * 1000.0 > double(impl_->sparseTimeoutMilliseconds)) {
         try {
             impl_->markUnhealthy(
                 "sparse unmapping exceeded " +
-                std::to_string(kSparseUnmapTimeoutMilliseconds) +
+                std::to_string(impl_->sparseTimeoutMilliseconds) +
                 " ms without completing");
         } catch (...) {
         }
@@ -1334,7 +1330,18 @@ CommandTicket MetalBackend::submitCommandAsync(
             dispatch.threadsPerThreadgroup.y *
             dispatch.threadsPerThreadgroup.z;
 
-        std::unordered_set<uint32_t> indices;
+        // Each binding takes its own entry of the argument table.
+        uint32_t indices = 0;
+        const auto claim = [&](uint32_t index) {
+            if (index >= kBufferArgumentEntries) {
+                throw MetalBackendError(
+                    "compute binding index exceeds the argument table");
+            }
+            if (indices & (uint32_t{1} << index)) {
+                throw MetalBackendError("duplicate compute binding index");
+            }
+            indices |= uint32_t{1} << index;
+        };
         for (const BufferBinding &binding : dispatch.buffers) {
             if (!binding.buffer.impl_ || !binding.buffer.impl_->allocation) {
                 std::ostringstream message;
@@ -1348,18 +1355,14 @@ CommandTicket MetalBackend::submitCommandAsync(
                 throw MetalBackendError(
                     "compute dispatch buffer belongs to another backend");
             }
-            if (!indices.insert(binding.index).second) {
-                throw MetalBackendError("duplicate compute binding index");
-            }
+            claim(binding.index);
         }
         for (const BytesBinding &binding : dispatch.bytes) {
             if (!binding.data || !binding.sizeBytes) {
                 throw MetalBackendError("compute byte binding is empty");
             }
             checkedNSUInteger(binding.sizeBytes, "byte binding size");
-            if (!indices.insert(binding.index).second) {
-                throw MetalBackendError("duplicate compute binding index");
-            }
+            claim(binding.index);
         }
         prepared.push_back(item);
     }
@@ -1458,9 +1461,10 @@ CommandTicket MetalBackend::submitCommandAsync(
         observer->mapWaitStarted.store(mapWaitStart, std::memory_order_relaxed);
         observer->mapWaitEvent.store(sparseEventValue, std::memory_order_release);
     }
-    afterMetalEvent(event, sparseEventValue, kSparseMapTimeoutMilliseconds,
+    const NSUInteger timeout = impl_->sparseTimeoutMilliseconds;
+    afterMetalEvent(event, sparseEventValue, timeout,
         [command, event, observer, ticketState, sparseEventValue,
-         pendingMap, mapWaitStart, wallStart](bool signaled) {
+         pendingMap, mapWaitStart, wallStart, timeout](bool signaled) {
             if (pendingMap) {
                 const double waited = steadySeconds() - mapWaitStart;
                 observer->lastMapWaitSeconds.store(waited, std::memory_order_relaxed);
@@ -1477,8 +1481,7 @@ CommandTicket MetalBackend::submitCommandAsync(
                         << ticketState->sequence << ": event " << sparseEventValue
                         << ", signaled " << event.signaledValue;
                 if (!signaled)
-                    message << ", wait exceeded "
-                            << kSparseMapTimeoutMilliseconds << " ms";
+                    message << ", wait exceeded " << timeout << " ms";
                 CommandTiming timing;
                 timing.wallSeconds = std::chrono::duration<double>(
                     std::chrono::steady_clock::now() - wallStart).count();
@@ -1559,7 +1562,7 @@ uint64_t MetalBackend::submissionCount() const noexcept {
 
 size_t MetalBackend::pipelineCount() const noexcept {
     std::lock_guard lock(impl_->commandMutex);
-    return impl_->pipelines.count;
+    return impl_->pipelines.size();
 }
 
 void MetalBackend::checkHealth() {

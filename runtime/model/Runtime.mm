@@ -456,24 +456,34 @@ struct Runtime::Impl {
         image.data = std::make_shared<ImageData>();
         image.data->embeddings = cachedEmbeddings(span);
         image.data->encoded = static_cast<bool>(image.data->embeddings);
-        if (image.data->encoded)
-          ++counters.imageEmbeddingReuses;
-        else
+        if (!image.data->encoded)
           bytes += span.pixelBytes() + embeddingBytes(span);
       }
       staged.push_back(std::move(image));
     }
     // Keep cache references alive during admission. Only misses need the
     // encoder; cached rows can be injected after its arena has been reclaimed.
-    if (bytes && !vision) {
+    const uint64_t encoderBytes =
+        bytes && !vision ? ops::Vision::scratchBytes(
+                               package.vision.tensors.layout,
+                               maximumImagePatches)
+                         : 0;
+    // At the budget the engine retries a denied admission after each reclaim
+    // step. Checking the whole attempt first, with the GDN cells and draft
+    // ring the lane needs beyond the idle pool, keeps a denial from building
+    // and dropping the encoder arena and image buffers every time.
+    if (bytes) {
+      if (auto admission = admitAllocation(
+              encoderBytes + bytes + states.activationBytes(), [] {});
+          !admission)
+        return admission;
+    }
+    if (encoderBytes) {
       std::unique_ptr<ops::Vision> candidate;
-      const auto admission = admitAllocation(
-              ops::Vision::scratchBytes(package.vision.tensors.layout,
-                                        maximumImagePatches),
-              [&] {
-                candidate = std::make_unique<ops::Vision>(
-                    backend, package.vision.tensors, maximumImagePatches);
-              });
+      const auto admission = admitAllocation(encoderBytes, [&] {
+        candidate = std::make_unique<ops::Vision>(
+            backend, package.vision.tensors, maximumImagePatches);
+      });
       if (!admission)
         return admission;
       vision = std::move(candidate);
@@ -499,6 +509,24 @@ struct Runtime::Impl {
     }
     stagedImages.emplace(request.id, std::move(staged));
     return true;
+  }
+
+  // Hands an admitted request its staged images. Only then do its embedding
+  // cache hits count as reuses; the engine retries denied admissions.
+  void takeStagedImages(Request &entry) {
+    const auto staged = stagedImages.find(entry.id);
+    if (staged == stagedImages.end())
+      return;
+    entry.images = std::move(staged->second);
+    stagedImages.erase(staged);
+    for (auto image = entry.images.begin(); image != entry.images.end();
+         ++image) {
+      const bool repeated = std::any_of(
+          entry.images.begin(), image,
+          [&](const ImageState &first) { return first.data == image->data; });
+      if (image->data->encoded && !repeated)
+        ++counters.imageEmbeddingReuses;
+    }
   }
 
   [[nodiscard]] bool visionIdle() const noexcept {
@@ -792,10 +820,9 @@ struct Runtime::Impl {
     uint32_t capturedRows = 0;
   };
 
-  MetalBuffer prefillU16(PrefillTensor tensor, uint32_t begin, uint32_t rows,
-                         uint32_t width) const {
-    return backend.view(prefillArena->get(tensor),
-                        bytesFor<uint16_t>(uint64_t{begin} * width),
+  MetalBuffer prefillU16(const MetalBuffer &tensor, uint32_t begin,
+                         uint32_t rows, uint32_t width) const {
+    return backend.view(tensor, bytesFor<uint16_t>(uint64_t{begin} * width),
                         bytesFor<uint16_t>(uint64_t{rows} * width));
   }
 
@@ -1023,7 +1050,7 @@ struct Runtime::Impl {
         geometry.target.kvLayout.attentionLayers);
     for (uint32_t layer = 0; layer < kvLayers.size(); ++layer)
       kvLayers[layer] = kvPages.layer(layer);
-    targetModel.addPrefill(
+    const MetalBuffer finalHidden = targetModel.addPrefill(
         graph, std::move(buffers),
         std::span(modelSequences).first(batch.sequences.size()), batch.rows,
         kvLayers);
@@ -1042,8 +1069,8 @@ struct Runtime::Impl {
       const uint32_t lastRows = std::min(item.tokenCount, kDecodeRows);
       ops::DraftAttention::gatherLastRows(
           graph,
-          prefillU16(PrefillTensor::Hidden0, sequence.rowBegin,
-                     item.tokenCount, geometry.target.hiddenSize),
+          prefillU16(finalHidden, sequence.rowBegin, item.tokenCount,
+                     geometry.target.hiddenSize),
           d(DecodeTensor::Hidden0), item.tokenCount,
           geometry.target.hiddenSize);
       if (scoring) {
@@ -1803,11 +1830,7 @@ StateAdmission Runtime::resume(const ModelRequest &request) {
     entry.slot = *admission.cell;
     entry.resident = true;
     entry.promptTokens = static_cast<uint32_t>(request.prompt.size());
-    if (auto staged = impl_->stagedImages.find(request.id);
-        staged != impl_->stagedImages.end()) {
-      entry.images = std::move(staged->second);
-      impl_->stagedImages.erase(staged);
-    }
+    impl_->takeStagedImages(entry);
   }
   images.committed = admission.granted();
   return admission;
@@ -1870,11 +1893,7 @@ metal::AllocationResult Runtime::beginAt(const ModelRequest &request, uint32_t s
     return admission;
   entry.slot = stateSlot;
   entry.resident = true;
-  if (auto staged = impl_->stagedImages.find(request.id);
-      staged != impl_->stagedImages.end()) {
-    entry.images = std::move(staged->second);
-    impl_->stagedImages.erase(staged);
-  }
+  impl_->takeStagedImages(entry);
   try {
     auto [_, inserted] = impl_->requests.emplace(request.id, std::move(entry));
     if (!inserted) {
