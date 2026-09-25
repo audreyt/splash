@@ -2,7 +2,6 @@
 
 #include "metal/DeviceCapabilities.hpp"
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -277,9 +276,6 @@ public:
   MetalBackend &operator=(MetalBackend &&) noexcept;
 
   [[nodiscard]] const DeviceCapabilities &capabilities() const noexcept;
-  // Digest of the immutable bytes used to create this backend's library,
-  // independent of later replacement or removal of its original file path.
-  [[nodiscard]] const std::array<uint8_t, 32> &metallibSha256() const noexcept;
 
   [[nodiscard]] MetalBuffer
   allocateBuffer(uint64_t bytes, BufferStorage storage = BufferStorage::Shared,

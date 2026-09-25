@@ -6,7 +6,6 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
-#include <CommonCrypto/CommonDigest.h>
 #include <IOKit/IOKitLib.h>
 #include <dispatch/dispatch.h>
 
@@ -444,7 +443,6 @@ struct MetalBackend::Impl {
         *pipelines = nil;
 
     DeviceCapabilities capabilities;
-    std::array<uint8_t, 32> metallibSha256{};
     std::shared_ptr<AllocationAccounting> accounting =
         std::make_shared<AllocationAccounting>();
     std::shared_ptr<BackendAsyncState> asyncState =
@@ -728,29 +726,13 @@ MetalBackend::MetalBackend(std::string metallibPath, double commandTimeoutSecond
                 "unable to read metallib " + metallibPath + ": " +
                 errorDescription(error));
         }
-        if (!fileData.length ||
-            fileData.length > std::numeric_limits<CC_LONG>::max()) {
-            throw MetalBackendError("metallib is empty or too large to hash: " +
-                                    metallibPath);
-        }
-        // DEFAULT copies into immutable dispatch-owned storage. Hash the same
-        // contiguous data passed to Metal, never a second read of the path.
+        // The library keeps the bytes read here, whatever later replaces the
+        // path; the dispatch data retains them rather than copying them.
         dispatch_data_t data = dispatch_data_create(
-            fileData.bytes, fileData.length, nullptr,
-            DISPATCH_DATA_DESTRUCTOR_DEFAULT);
-        if (!data)
-            throw MetalBackendError("unable to copy metallib data: " + metallibPath);
-        const void *bytes = nullptr;
-        size_t byteCount = 0;
-        dispatch_data_t mapped = dispatch_data_create_map(data, &bytes, &byteCount);
-        if (!mapped || !bytes || byteCount != fileData.length ||
-            !CC_SHA256(bytes, static_cast<CC_LONG>(byteCount),
-                       impl_->metallibSha256.data())) {
-            throw MetalBackendError("unable to hash metallib data: " + metallibPath);
-        }
+            fileData.bytes, fileData.length, nullptr, ^{ (void)fileData; });
         error = nil;
         impl_->library =
-            [impl_->device newLibraryWithData:mapped error:&error];
+            [impl_->device newLibraryWithData:data error:&error];
         if (!impl_->library) {
             throw MetalBackendError(
                 "unable to load metallib " + metallibPath + ": " +
@@ -884,10 +866,6 @@ MetalBackend &MetalBackend::operator=(MetalBackend &&other) noexcept {
 
 const DeviceCapabilities &MetalBackend::capabilities() const noexcept {
     return impl_->capabilities;
-}
-
-const std::array<uint8_t, 32> &MetalBackend::metallibSha256() const noexcept {
-    return impl_->metallibSha256;
 }
 
 void MetalBackend::checkOperation() const {

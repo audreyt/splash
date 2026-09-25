@@ -6,7 +6,6 @@
 #import <Metal/Metal.h>
 #import <objc/runtime.h>
 
-#include <CommonCrypto/CommonDigest.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -77,17 +76,6 @@ struct TemporaryMetallib final {
     ~TemporaryMetallib() { ::unlink(path.c_str()); }
     std::string path;
 };
-
-std::array<uint8_t, 32> libraryDigest(NSData *data) {
-    require(data && data.length &&
-                data.length <= std::numeric_limits<CC_LONG>::max(),
-            "invalid test library data");
-    std::array<uint8_t, 32> digest{};
-    require(CC_SHA256(data.bytes, static_cast<CC_LONG>(data.length),
-                      digest.data()) != nullptr,
-            "test library SHA-256 failed");
-    return digest;
-}
 
 template <typename Function>
 void requireBackendError(Function &&function, const std::string &message) {
@@ -946,7 +934,6 @@ void run(const std::string &metallibPath) {
     backendDeferredSubmission(metallibPath);
     NSData *libraryData = [NSData dataWithContentsOfFile:
         [NSString stringWithUTF8String:metallibPath.c_str()]];
-    const auto expectedDigest = libraryDigest(libraryData);
     TemporaryMetallib temporary;
     NSString *temporaryPath = [NSString stringWithUTF8String:temporary.path.c_str()];
     require([libraryData writeToFile:temporaryPath options:0 error:nullptr],
@@ -968,18 +955,11 @@ void run(const std::string &metallibPath) {
             "operation guard leaked memory or poisoned the backend");
     backend.setOperationGuard({});
 
-    require(backend.metallibSha256() == expectedDigest,
-            "backend digest does not match the loaded library bytes");
     NSData *replacement = [@"replaced after library loading"
         dataUsingEncoding:NSUTF8StringEncoding];
     require([replacement writeToFile:temporaryPath
                             options:NSDataWritingAtomic error:nullptr],
             "could not replace temporary metallib");
-    require(libraryDigest([NSData dataWithContentsOfFile:temporaryPath]) !=
-                expectedDigest,
-            "temporary metallib replacement did not change its bytes");
-    require(backend.metallibSha256() == expectedDigest,
-            "backend digest followed the replaced library path");
     // All existing pipeline/dispatch checks below run from the original
     // loaded library even though its former path now contains invalid bytes.
     const auto &capabilities = backend.capabilities();
