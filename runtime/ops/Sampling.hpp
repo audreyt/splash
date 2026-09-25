@@ -85,6 +85,7 @@ struct AcceptanceBuffers final {
 // and greedy argmax pipeline ABIs; the model only supplies policy and buffers.
 class Sampling final {
 public:
+  // rowsPerLane is the kernels' SPLASH_TARGET_VERIFY_ROWS.
   Sampling(metal::MetalBackend &backend, uint32_t vocabulary,
            uint32_t rowsPerLane);
 
@@ -98,6 +99,7 @@ public:
   void addVerify(metal::CommandGraph &graph,
                  std::span<const SamplingPolicy> policies,
                  SamplingBuffers buffers) const;
+  // proposalTokens is the kernels' SPLASH_DRAFT_PROPOSAL_TOKENS.
   void addDraftSelector(
       metal::CommandGraph &graph, DraftSelectorBuffers buffers,
       std::span<const uint32_t> anchors,
