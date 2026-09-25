@@ -56,6 +56,8 @@ public:
         ++mappingAttempts;
         if (!admission) return false;
         if (failExtent && extent == *failExtent) return false;
+        if (throwExtent && extent == *throwExtent)
+            throw std::runtime_error("test mapping failure");
         resident_.at(extent) = true;
         return true;
     }
@@ -83,6 +85,7 @@ public:
     }
     bool admission = true;
     std::optional<uint32_t> failExtent;
+    std::optional<uint32_t> throwExtent;
     uint32_t mappingAttempts = 0;
     uint32_t releasedExtents = 0;
 
@@ -164,6 +167,30 @@ void testFailedGrowthRollbackIsPaced() {
                     backing.releasedExtents == released + 1,
                 "rolled-back extent was not left to paced reclaim");
     }
+}
+
+// A backing that throws while mapping leaves every page free and the
+// accounting whole; the extent mapped before it stays resident and
+// reclaimable, and the pool keeps serving.
+void testThrowingBackingKeepsAccounting() {
+    TestBacking backing(12, 4);
+    backing.throwExtent = 1;
+    KvPool pool(backing);
+    bool threw = false;
+    try {
+        static_cast<void>(pool.acquirePages(5, false));
+    } catch (const std::runtime_error &) {
+        threw = true;
+    }
+    auto status = pool.snapshot();
+    require(threw && status.pagesFree == 12 && status.pagesActive == 0 &&
+                status.pagesFreeResident == 4 && status.pagesResident == 4 &&
+                status.reclaimableExtents == 1,
+            "throwing backing leaked pages or broke residency accounting");
+    backing.throwExtent.reset();
+    auto pages = pool.acquirePages(5, false);
+    require(pages.granted() && pool.snapshot().pagesActive == 5,
+            "pool did not serve after a throwing backing");
 }
 
 void testPressureReusesResidentPagesAndDeniesGrowth() {
@@ -346,6 +373,7 @@ int main() {
         testGrowthPacksResidentExtents();
         testFailedGrowthRollsBackAtomically();
         testFailedGrowthRollbackIsPaced();
+        testThrowingBackingKeepsAccounting();
         testPressureReusesResidentPagesAndDeniesGrowth();
         testReleasesArePacedBehindTheBacking();
         testFullestExtentFillsFirstSoColdExtentsDrain();
