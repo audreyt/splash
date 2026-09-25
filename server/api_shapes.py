@@ -793,15 +793,14 @@ def anthropic_to_chat_prompt(body, *, thinking_resolver):
                     try:
                         reasoning = thinking_resolver(signature)
                     except APIError as error:
-                        # Other providers' signatures are opaque. Preserve their
-                        # visible history; hidden content still needs our key.
-                        if (
-                            error.code != "invalid_thinking_signature"
-                            or not block["thinking"]
-                        ):
+                        # Other providers' signatures are opaque, as are ours
+                        # under another key. Preserve their visible history;
+                        # hidden content is dropped, as redacted_thinking is.
+                        if error.code != "invalid_thinking_signature":
                             raise
                         reasoning = block["thinking"]
-                    reasoning_parts.append(reasoning)
+                    if reasoning:
+                        reasoning_parts.append(reasoning)
                 else:
                     reasoning_parts.append(block["thinking"])
             elif role == "assistant" and kind == "redacted_thinking":
