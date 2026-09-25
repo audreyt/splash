@@ -260,4 +260,6 @@ The [launch post](https://inco.ai/blog/splash/) covers the design in depth.
 
 - [DEVELOPMENT.md](DEVELOPMENT.md): building from source, model loading, tests
   and release packaging.
-- Apache-2.0, see [LICENSE](LICENSE). Model weights keep their own licenses.
+- Apache-2.0, see [LICENSE](LICENSE); the GGUF kernels include MIT-licensed
+  material from llama.cpp, see [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).
+  Model weights keep their own licenses.

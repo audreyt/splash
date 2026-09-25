@@ -28,7 +28,7 @@ class PackagedServerTests(unittest.TestCase):
             (root / "build").mkdir()
             for name in ("splash", "splash.metallib"):
                 (root / "build" / name).write_bytes(b"unused CPU test fixture")
-            for name in ("LICENSE",):
+            for name in package.LICENSE_FILES:
                 shutil.copy2(package.ROOT / name, root / name)
             with mock.patch.object(package, "ROOT", root):
                 package.stage_runtime(stage, "test")

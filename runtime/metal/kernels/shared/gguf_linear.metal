@@ -1,6 +1,6 @@
 // GGUF quantized GEMMs (K-quants, i-quants, Q8_0) for Apple9 and Apple10.
 // Decode weights with FP32 group coefficients, then round once to the half tile,
-// matching llama.cpp Metal dequantize.h / mul_mm.metal. Keep activations BF16.
+// matching llama.cpp Metal dequantize.h / mul_mm.metal (MIT notice in THIRD_PARTY_NOTICES). Keep activations BF16.
 // Weight planes and meta in the MDGG0001 layout (metal/abi/QuantFormat.h), decoded by kernels/common/quant_formats.h.
 // Activations bf16 [rows][K]; weights staged as fp16 in threadgroup memory; fp32 accumulation; bf16 output.
 // Keep the source order of float operations, which Metal's default fast math lets the compiler reassociate. Set

@@ -68,6 +68,8 @@ SERVER_FILES = (
     "crash_trace.py",
     "chat.html",
 )
+# Splash's license and the notices of the third-party code it ships.
+LICENSE_FILES = ("LICENSE", "THIRD_PARTY_NOTICES")
 
 
 def digest(path):
@@ -86,7 +88,7 @@ def stage_runtime(destination, version):
         source = ROOT / ("build" if folder == "engine" else folder)
         for name in names:
             shutil.copy2(source / name, destination / folder / name)
-    for name in ("LICENSE",):
+    for name in LICENSE_FILES:
         shutil.copy2(ROOT / name, destination / name)
     (destination / "release.json").write_text(
         json.dumps(

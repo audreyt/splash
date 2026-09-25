@@ -5,7 +5,8 @@
 using namespace metal;
 
 // Per-format decoding of one (row, group of 32) of the MDGG0001 image, shared
-// by the GEMM kernels. A group is read by chunk (metal/abi/QuantFormat.h):
+// by the GEMM kernels, to the values of llama.cpp's dequantize.h (MIT notice
+// in THIRD_PARTY_NOTICES). A group is read by chunk (metal/abi/QuantFormat.h):
 // chunk c holds pairs p = 0..3; pairs 0, 1 are elements 4c..4c+3 of the first
 // 16-group and pairs 2, 3 are elements 16+4c..16+4c+3 of the second. A format
 // has its id, its sizes P0, P1, MetaBytes and MetaGroups from kQuantFormats,

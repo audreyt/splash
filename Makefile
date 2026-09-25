@@ -11,18 +11,20 @@ PYTHON = $(VENV)/bin/python
 VENV_STAMP = $(VENV)/.requirements-installed
 INSTALL_LOCK = $(VENV).install.lock
 REQUIREMENTS := install/requirements.txt
-PYTHON_CANDIDATES := python3.13 python3 python3.12 python3.14
+PYTHON_CANDIDATES ?= python3.13 python3 python3.12 python3.14
 BUILD_ID_PYTHON ?= python3
 SPLASH_MAKEFILE := $(abspath $(firstword $(MAKEFILE_LIST)))
 MODEL ?=
 # MODEL with the installer's source options selects one installation
 # (DEVELOPMENT.md, Upstream model loading); every model target passes them.
+# LANGUAGE_ONLY=1 selects the text-only installation; 0 or empty, the one
+# with vision.
 REVISION ?=
 DRAFT_MODEL ?=
 LANGUAGE_ONLY ?=
 MODEL_ARGS = --model "$(MODEL)" $(if $(REVISION),--revision "$(REVISION)") \
 	$(if $(DRAFT_MODEL),--draft-model "$(DRAFT_MODEL)") \
-	$(if $(LANGUAGE_ONLY),--language-only)
+	$(if $(filter 1,$(LANGUAGE_ONLY)),--language-only)
 MODEL_INSTALL = $(PYTHON) install/models.py $(MODEL_ARGS)
 # The installation's selection link, as the installer names it.
 MODEL_ROOT = $(if $(MODEL),$(shell $(MODEL_INSTALL) link))
@@ -76,6 +78,10 @@ model-selection:
 		echo "error: set MODEL to a model ID as splash serve --model takes it (OWNER/REPO[:VARIANT])" >&2; \
 		exit 1; \
 	}
+	@case "$(LANGUAGE_ONLY)" in ""|0|1) ;; *) \
+		echo "error: LANGUAGE_ONLY is 1 (text only) or 0" >&2; \
+		exit 1;; \
+	esac
 
 platform-check:
 	@test "$(SYSTEM_NAME)" = Darwin && test "$(SYSTEM_ARCH)" = arm64 || { \

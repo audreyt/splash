@@ -31,6 +31,20 @@ MODEL_IDS = (
 
 
 class LauncherTests(unittest.TestCase):
+    def setUp(self):
+        # No serve refreshes the catalog from the Hub into the checkout, and
+        # the launcher's defaults ignore the caller's Splash settings.
+        self.refresh = self.enterContext(
+            mock.patch.object(launcher.catalog, "spawn_refresh")
+        )
+        self.enterContext(mock.patch.dict(os.environ))
+        for name in (
+            "SPLASH_PORT",
+            "SPLASH_API_KEY",
+            "SPLASH_DEFAULT_REASONING_EFFORT",
+        ):
+            os.environ.pop(name, None)
+
     def test_kv_format_is_an_explicit_load_option(self):
         base = ["serve", "--model", MODEL_ID]
         self.assertEqual(launcher.parse_args(base).kv_format, "int8")
@@ -134,7 +148,6 @@ class LauncherTests(unittest.TestCase):
                 mock.patch.object(launcher, "RUNTIME_DIR", Path(temporary)),
                 mock.patch.object(launcher.socket, "socket") as factory,
                 mock.patch.object(launcher, "_ensure_installed"),
-                mock.patch.object(launcher.catalog, "spawn_refresh"),
                 mock.patch.object(launcher.os, "execve") as execute,
             ):
                 arguments = [
@@ -203,7 +216,7 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(json.loads(lock_path.read_text()), owner)
 
             def check_exec(binary, argv, environment):
-                refresh.assert_called_once_with()
+                self.refresh.assert_called_once_with()
                 self.assertEqual(binary, str(launcher.paths.PYTHON))
                 self.assertEqual(argv[argv.index("--max-context") + 1], "102400")
                 self.assertEqual(
@@ -238,7 +251,6 @@ class LauncherTests(unittest.TestCase):
             with (
                 mock.patch.object(launcher, "RUNTIME_DIR", runtime),
                 mock.patch.object(launcher.socket, "socket"),
-                mock.patch.object(launcher.catalog, "spawn_refresh") as refresh,
                 mock.patch.object(
                     launcher, "_ensure_installed", side_effect=check_install
                 ) as install,
@@ -438,6 +450,43 @@ class LauncherTests(unittest.TestCase):
                     install.assert_not_called()
                     execute.assert_not_called()
 
+    def test_real_port_probe_rejects_a_listener_on_another_address_of_the_port(self):
+        # SO_REUSEADDR lets 127.0.0.1 bind beside another process's wildcard
+        # listener, IPv4 or dual-stack (python -m http.server), and take its
+        # loopback clients; and 0.0.0.0 bind beside a loopback listener,
+        # which keeps the clients the launcher connects to 127.0.0.1.
+        for listen, host in (
+            ("0.0.0.0", "127.0.0.1"),
+            ("::", "127.0.0.1"),
+            ("127.0.0.1", "0.0.0.0"),
+        ):
+            family = socket.AF_INET6 if ":" in listen else socket.AF_INET
+            with (
+                self.subTest(listen=listen, host=host),
+                tempfile.TemporaryDirectory() as temporary,
+                socket.socket(family) as listener,
+            ):
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                if family == socket.AF_INET6:
+                    listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                listener.bind((listen, 0))
+                port = listener.getsockname()[1]
+                listener.listen()
+                with (
+                    mock.patch.object(launcher, "RUNTIME_DIR", Path(temporary)),
+                    mock.patch.object(launcher, "_ensure_installed") as install,
+                    mock.patch.object(launcher.os, "execve") as execute,
+                    mock.patch("sys.stderr", io.StringIO()) as error,
+                ):
+                    result = launcher.main(
+                        ["serve", "--model", MODEL_ID, "--host", host]
+                        + ["--port", str(port)]
+                    )
+                self.assertEqual(result, 1)
+                self.assertIn(f"cannot bind {host}:{port}: ", error.getvalue())
+                install.assert_not_called()
+                execute.assert_not_called()
+
     def test_port_selection_validates_environment_and_explicit_override(self):
         with mock.patch.dict(os.environ, {"SPLASH_PORT": "8123"}):
             self.assertEqual(
@@ -513,7 +562,6 @@ class LauncherTests(unittest.TestCase):
             with (
                 mock.patch.object(launcher, "RUNTIME_DIR", runtime),
                 mock.patch.object(launcher, "_ensure_installed") as install,
-                mock.patch.object(launcher.catalog, "spawn_refresh"),
                 mock.patch.object(launcher.os, "execve", side_effect=execute),
                 mock.patch("sys.stderr", io.StringIO()) as error,
             ):
@@ -710,7 +758,6 @@ class LauncherTests(unittest.TestCase):
             with (
                 mock.patch.object(launcher, "RUNTIME_DIR", runtime),
                 mock.patch.object(launcher.socket, "socket"),
-                mock.patch.object(launcher.catalog, "spawn_refresh"),
                 mock.patch.object(launcher, "_ensure_installed") as install,
                 mock.patch.object(
                     launcher.model_artifacts,
@@ -789,7 +836,6 @@ class LauncherTests(unittest.TestCase):
                 mock.patch.object(launcher, "RUNTIME_DIR", runtime),
                 mock.patch.object(launcher.paths, "MODELS", runtime / "models"),
                 mock.patch.object(launcher.socket, "socket"),
-                mock.patch.object(launcher.catalog, "spawn_refresh"),
                 mock.patch.object(launcher, "_ensure_installed"),
                 mock.patch.object(
                     launcher.model_artifacts, "selection_link", return_value=selection

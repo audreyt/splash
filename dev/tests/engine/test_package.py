@@ -29,7 +29,7 @@ class PackageTests(unittest.TestCase):
                 (root / folder).mkdir(parents=True)
                 for name in names:
                     (root / folder / name).write_text("fixture")
-            for name in ("LICENSE",):
+            for name in package.LICENSE_FILES:
                 (root / name).write_text("fixture")
             (root / "install/completions/official-models.txt").write_text(
                 "company/Published\n"
@@ -89,7 +89,7 @@ class PackageTests(unittest.TestCase):
                 (root / folder).mkdir(parents=True)
                 for name in names:
                     (root / folder / name).write_text("fixture")
-            for name in ("LICENSE",):
+            for name in package.LICENSE_FILES:
                 (root / name).write_text("license")
             completions = root / "install/completions"
             completions.mkdir()
@@ -112,7 +112,14 @@ class PackageTests(unittest.TestCase):
                 package.stage_runtime(stage, "test")
             self.assertEqual(
                 {p.name for p in stage.iterdir()},
-                {"install", "server", "engine", "LICENSE", "release.json"},
+                {
+                    "install",
+                    "server",
+                    "engine",
+                    "LICENSE",
+                    "THIRD_PARTY_NOTICES",
+                    "release.json",
+                },
             )
             self.assertEqual(
                 {p.name for p in (stage / "install").iterdir()},

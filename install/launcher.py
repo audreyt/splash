@@ -2,6 +2,7 @@
 """Serve in the foreground, or connect an installed agent to the local server."""
 
 import argparse
+import errno
 import fcntl
 import http.client
 import json
@@ -127,6 +128,29 @@ def _serve_lock_owner(lock):
     return f" (PID {pid}, model {model}, port {port})"
 
 
+def _check_port(host, port):
+    """Raise OSError if another process owns host:port. The probe binds with
+    SO_REUSEADDR, as the HTTP listener does, so closed connections in
+    TIME_WAIT do not block a restart; a live listener at the address still
+    refuses the bind. The option also lets the bind succeed beside another
+    process's listener at a wider or narrower address of the port (0.0.0.0
+    or a dual-stack :: beside 127.0.0.1, or the reverse), and the two would
+    then split the address's connections, so a listener that accepts one
+    there owns the port too."""
+    with socket.socket() as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind((host, port))
+        address = probe.getsockname()[0]
+    # A wildcard address is tried on loopback, where the launcher's clients
+    # connect.
+    if address == "0.0.0.0":
+        address = "127.0.0.1"
+    with socket.socket() as client:
+        client.settimeout(1)
+        if client.connect_ex((address, port)) == 0:
+            raise OSError(errno.EADDRINUSE, os.strerror(errno.EADDRINUSE))
+
+
 def serve(args):
     # Keep both locks across exec until the foreground server exits.
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
@@ -155,16 +179,12 @@ def serve(args):
         lock.flush()
         # Fail before downloads/builds if another service owns the selected port.
         # The HTTP server also binds before loading weights, closing the race.
-        with socket.socket() as probe:
-            # Match the HTTP listener: closed connections in TIME_WAIT must
-            # not block a restart; a live listener still owns the address.
-            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                probe.bind((args.host, args.port))
-            except OSError as error:
-                raise LauncherError(
-                    f"cannot bind {args.host}:{args.port}: {error}"
-                ) from None
+        try:
+            _check_port(args.host, args.port)
+        except OSError as error:
+            raise LauncherError(
+                f"cannot bind {args.host}:{args.port}: {error}"
+            ) from None
         selection = model_artifacts.Selection.of(
             paths.MODELS,
             args.model,

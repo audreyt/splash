@@ -500,7 +500,9 @@ The ABIs are in `runtime/metal/abi/Gguf.h`, which also defines the tile geometry
 and `LinearGguf.cpp` share, and `MoE.h`; the image formats in
 `runtime/metal/abi/QuantFormat.h`, their decoding in `runtime/metal/kernels/common/quant_formats.h`
 and the decode-only value tables in `runtime/metal/abi/QuantTables.h`, which no prepared byte
-depends on; weight preparation's repack ABI is `runtime/metal/abi/GgufRepack.h`.
+depends on; weight preparation's repack ABI is `runtime/metal/abi/GgufRepack.h`. The tables are
+llama.cpp's and the decoding follows its Metal kernels: both keep llama.cpp's MIT notice in
+`THIRD_PARTY_NOTICES`, which the package ships.
 
 The tests' CPU reference (`dev/tests/engine/GgufFormatReference.hpp`) must reproduce the golden
 hashes of upstream GGML's dequantization (llama.cpp 7ab4ee7) in `gguf-reference`, and
