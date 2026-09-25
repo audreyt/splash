@@ -61,6 +61,18 @@ def _additional_properties(validator, additional, instance, schema):
                     yield from validator.descend(value, additional, path=key)
 
 
+def json_objects(value):
+    """Yield every object in a JSON document."""
+    pending = [value]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            yield value
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+
+
 @lru_cache(maxsize=8)
 def _bounded_class(base):
     return validators.extend(
@@ -95,6 +107,14 @@ def build_validator(schema, nodes, registry):
             return cached[2]
     base = validators.validator_for(schema)
     base.check_schema(schema)
+    # jsonschema matches patternProperties with the unbounded standard-library
+    # engine to find the properties unevaluatedProperties applies to. A
+    # reference can reach any object, so one document cannot use both.
+    keywords = {key for node in json_objects(schema) for key in node}
+    if {"patternProperties", "unevaluatedProperties"} <= keywords:
+        raise APIError(
+            400, "unevaluatedProperties with patternProperties is not supported"
+        )
     validated = copy.deepcopy(schema)
     # A document uses one dialect. Removing identical declarations prevents
     # jsonschema.evolve from replacing the bounded class at a local reference.

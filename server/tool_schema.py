@@ -14,10 +14,10 @@ from referencing import Registry
 
 if __package__:
     from .errors import APIError
-    from .schema_validation import build_validator
+    from .schema_validation import build_validator, json_objects
 else:  # ``python server/server.py`` from the repo root.
     from errors import APIError
-    from schema_validation import build_validator
+    from schema_validation import build_validator, json_objects
 
 MAX_JSON_NESTING = 256
 
@@ -181,17 +181,11 @@ def _grammar_compatible_schema(schema):
             node.pop("pattern", None)
     # A local reference can point anywhere in the document, so any object may
     # be compiled as a schema.
-    pending = [output]
-    while pending:
-        value = pending.pop()
-        if isinstance(value, dict):
-            for key in GRAMMAR_BOUND_KEYWORDS:
-                bound = value.get(key)
-                if isinstance(bound, (int, float)) and bound > MAX_GRAMMAR_BOUND:
-                    del value[key]
-            pending.extend(value.values())
-        elif isinstance(value, list):
-            pending.extend(value)
+    for node in json_objects(output):
+        for key in GRAMMAR_BOUND_KEYWORDS:
+            bound = node.get(key)
+            if isinstance(bound, (int, float)) and bound > MAX_GRAMMAR_BOUND:
+                del node[key]
     if isinstance(output, dict):
         output["x-guidance"] = {"lenient": True}
     return output
