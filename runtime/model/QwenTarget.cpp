@@ -18,6 +18,8 @@ namespace {
 
 template <class Layout>
 QwenTargetGeometry commonGeometry(const Layout &layout) {
+  static_assert(std::tuple_size_v<decltype(Layout::hiddenCaptureLayers)> <=
+                QwenTargetGeometry::maximumCaptureLayers);
   QwenTargetGeometry result;
   result.maximumContextTokens = layout.maximumContextTokens;
   result.layers = layout.layers;

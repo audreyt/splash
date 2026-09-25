@@ -172,6 +172,8 @@ template <class Layout> void requireQwenLayout(const Layout &layout) {
   if (routingInconsistent || layout.gdnValueHeads % layout.gdnKeyHeads ||
       layout.convolutionDimension != (2 * layout.gdnKeyHeads + layout.gdnValueHeads) * layout.gdnHeadDimension ||
       layout.attentionWidth != layout.attentionQueryHeads * layout.attentionHeadDimension ||
+      // The GDN value rows are sized with attentionWidth throughout.
+      layout.gdnValueHeads * layout.gdnHeadDimension != layout.attentionWidth ||
       layout.packedFullWidth !=
           2 * layout.attentionWidth + 2 * layout.attentionKvHeads * layout.attentionHeadDimension ||
       std::ranges::any_of(layout.hiddenCaptureLayers, [&](uint32_t layer) { return layer >= layout.layers; }) ||
