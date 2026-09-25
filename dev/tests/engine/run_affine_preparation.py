@@ -216,8 +216,9 @@ def half_away(value):
 
 def quantized_group(weights):
     """64 weights quantized to 4 bits as MLX's affine quantization rounds them
-    (mlx.core.quantize): the packed codes, and the scale and bias as BF16."""
-    low, high = min(weights), max(weights)
+    (mlx.core.quantize, its Metal kernel, whose maximum starts at 0): the
+    packed codes, and the scale and bias as BF16."""
+    low, high = min(weights), max(0.0, *weights)
     low_edge = abs(low) > abs(high)
     scale = max(f32(f32(high - low) / 15), f32(1e-7))
     if not low_edge:
@@ -282,13 +283,19 @@ def draft_fixture(root):
         a = p + "self_attn."
         dynamic = None
         if layer == 0:
-            # A first row of edge cases: all zero, where no scale puts 0 on a
-            # code; constant; 0 to 15 with halves, which round away from
-            # zero; a minimum farther from zero than the maximum.
+            # Two first rows of edge cases: all zero, where no scale puts 0 on
+            # a code; constant; 0 to 15 with halves, which round away from
+            # zero; a minimum farther from zero than the maximum; then groups
+            # below zero, whose range still ends at 0: constant, spread, a
+            # maximum near zero, and -15 to -1 with halves.
             dynamic = [0.0] * 64 + [0.75] * 64
             dynamic += [2.5, 8.5, *(float(i % 16) for i in range(62))]
             dynamic += [(i % 20) / 4 - 4 for i in range(64)]
-            dynamic += [((i * 37 + 11) % 509 - 254) / 64 for i in range(255 * 256)]
+            dynamic += [-0.75] * 64
+            dynamic += [-(i % 16 + 1) / 4 for i in range(64)]
+            dynamic += [-1 / 64, *(-(i % 32 + 1) / 8 for i in range(63))]
+            dynamic += [-2.5, -8.5, *(-float(i % 15 + 1) for i in range(62))]
+            dynamic += [((i * 37 + 11) % 509 - 254) / 64 for i in range(254 * 256)]
         sections = [
             add(p + "input_layernorm.weight", [256]),
             add(p + "attention_conv.base_kernel", [2, 2, 256]),

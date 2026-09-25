@@ -110,21 +110,23 @@ uint16_t nearestBfloat16(float value) {
 }
 
 // A group of 64 BF16 weights as MLX's affine quantization rounds it to 4 bits
-// (mlx.core.quantize), in float: the end of the range farther from zero is
-// the bias, the scale is adjusted so that 0 falls on a code unless that code
-// is 0, each code is round((w - bias) / scale), halves away from zero, clamped
-// to [0, 15], and scale and bias are stored as BF16.
+// (mlx.core.quantize, its Metal kernel), in float: the range runs from the
+// minimum to the maximum or 0, whichever is greater, the end of the range
+// farther from zero is the bias, the scale is adjusted so that 0 falls on a
+// code unless that code is 0, each code is round((w - bias) / scale), halves
+// away from zero, clamped to [0, 15], and scale and bias are stored as BF16.
 void quantizeGroup(const uint8_t *weights, uint8_t *codes, uint16_t &scale, uint16_t &bias) {
   std::array<float, kQ4GroupElements> w;
   for (size_t i = 0; i < w.size(); ++i) {
     w[i] = bfloat16Value(weights + i * kBFloat16Bytes);
     if (!std::isfinite(w[i])) throw std::runtime_error("non-finite weight in a BF16 projection");
   }
-  const auto [minimum, maximum] = std::minmax_element(w.begin(), w.end());
-  const bool minimumEdge = std::fabs(*minimum) > std::fabs(*maximum);
-  float step = std::max((*maximum - *minimum) / 15.0F, 1e-7F);
+  const float minimum = *std::min_element(w.begin(), w.end());
+  const float maximum = std::max(0.0F, *std::max_element(w.begin(), w.end()));
+  const bool minimumEdge = std::fabs(minimum) > std::fabs(maximum);
+  float step = std::max((maximum - minimum) / 15.0F, 1e-7F);
   if (!minimumEdge) step = -step;
-  const float edge = minimumEdge ? *minimum : *maximum;
+  const float edge = minimumEdge ? minimum : maximum;
   const float q0 = std::round(edge / step);
   float offset = 0.0F;
   if (q0 != 0.0F) {
