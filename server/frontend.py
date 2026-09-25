@@ -12,8 +12,6 @@ from dataclasses import dataclass
 from itertools import count
 from pathlib import Path
 
-from jinja2 import TemplateError
-
 if __package__:
     from . import images as image_input
     from . import json_codec, judgments
@@ -26,6 +24,12 @@ if __package__:
         template_messages,
     )
     from .backend import REQUEST_PRIORITIES, Job, remaining_request_time
+    from .chat_templates import (
+        LATER_SYSTEM_UNSUPPORTED,
+        REASONING_EFFORTS,
+        render_chat_template,
+        template_options,
+    )
     from .diagnostics import print_status
     from .errors import APIError, ContextLengthError
     from .latency import LatencyMetrics
@@ -52,6 +56,12 @@ else:
         template_messages,
     )
     from backend import REQUEST_PRIORITIES, Job, remaining_request_time
+    from chat_templates import (
+        LATER_SYSTEM_UNSUPPORTED,
+        REASONING_EFFORTS,
+        render_chat_template,
+        template_options,
+    )
     from diagnostics import print_status
     from errors import APIError, ContextLengthError
     from latency import LatencyMetrics
@@ -68,8 +78,6 @@ else:
 
 
 PREPARATION_WAIT_SECONDS = 30.0
-REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
-REASONING_EFFORT_ALIASES = {"high": "xhigh", "max": "xhigh", "minimal": "low"}
 
 
 MIN_FLOAT32_SUBNORMAL = float.fromhex("0x1p-149")
@@ -220,6 +228,7 @@ class Frontend:
         preparation_capacity,
         *,
         constraint_factory,
+        chat_templates,
         thinking_codec,
         vision,
         max_image_pixels=image_input.MAX_PIXELS,
@@ -233,6 +242,9 @@ class Frontend:
         self.vision = vision
         self.latencies = LatencyMetrics()
         self.tokenizer = tokenizer
+        # Probed at startup; requests choose among these, never the
+        # tokenizer's own.
+        self.chat_templates = chat_templates
         self.prompt_tokenizer = PromptTokenizer(tokenizer)
         self.backend = backend
         self.model = model
@@ -277,6 +289,7 @@ class Frontend:
         status = self.backend.status()
         status["vision"] = self.vision
         status["input_modalities"] = self.input_modalities
+        status["chat_template"] = self.chat_templates.status()
         with self.preparation_lock:
             status["frontend"] = {
                 "preparation_capacity": self.preparation_capacity,
@@ -355,13 +368,14 @@ class Frontend:
         each real image to its placeholder even when a coding agent has read
         documentation or source containing literal vision tokens.
         """
-        source = self.tokenizer.get_chat_template(tools=template.get("tools"))
         rendered = self._apply_chat_template(
             messages,
             {
                 **template,
                 "tokenize": False,
-                "chat_template": source.replace(IMAGE_PAD_TOKEN, IMAGE_RENDER_MARKER),
+                "chat_template": template["chat_template"].replace(
+                    IMAGE_PAD_TOKEN, IMAGE_RENDER_MARKER
+                ),
             },
         )
         parts = rendered.split(IMAGE_RENDER_MARKER)
@@ -526,6 +540,7 @@ class Frontend:
             try:
                 tokens, slots, prompt = judgments.encode_prompt(
                     self.tokenizer,
+                    self.chat_templates.select(None).source,
                     judgments.judgment_messages(body),
                     judgments.LETTERS[: len(body["options"])],
                     admit=admit,
@@ -618,6 +633,7 @@ class Frontend:
                 try:
                     tokens, slot_ids, prompt = judgments.encode_prompt(
                         self.tokenizer,
+                        self.chat_templates.select(None).source,
                         judgments.systemone_messages(state, spec, labels),
                         labels,
                         admit=admit,
@@ -718,28 +734,6 @@ class Frontend:
         response_schema, response_validator = normalize_response_format(
             body.get("response_format")
         )
-        if response_schema is not None:
-            instruction = (
-                "Your final answer must be a JSON value matching the following "
-                "JSON schema, without Markdown fences."
-            )
-            if tools:
-                instruction += (
-                    " You may call tools first when needed. Tool calls use their "
-                    "own argument schemas; this schema applies only to your final answer."
-                )
-            instruction += "\n" + json.dumps(response_schema, separators=(",", ":"))
-            # The template already describes tools. Describe the answer format
-            # too, so the model can choose between a tool and a final answer.
-            index = next(
-                (
-                    i
-                    for i, message in enumerate(messages)
-                    if message["role"] != "system"
-                ),
-                len(messages),
-            )
-            messages.insert(index, {"role": "system", "content": instruction})
         return Prompt(
             messages,
             tools,
@@ -756,35 +750,25 @@ class Frontend:
 
     def _apply_chat_template(self, messages, template):
         with self.latencies.measure("template"):
-            return self._render_template(messages, template)
-
-    def _render_template(self, messages, template):
-        try:
-            return self.tokenizer.apply_chat_template(messages, **template)
-        except TemplateError:
-            alias = REASONING_EFFORT_ALIASES.get(template.get("reasoning_effort"))
-            if alias is None:
-                raise
-            return self.tokenizer.apply_chat_template(
-                messages, **{**template, "reasoning_effort": alias}
-            )
+            return render_chat_template(self.tokenizer, messages, template)
 
     def _render_prompt(
         self, prompt, deadline, *, check_context=True, add_generation_prompt=True
     ):
+        chat_template = self.chat_templates.select(prompt.tools)
+        if not chat_template.accepts(prompt.messages):
+            raise APIError(400, LATER_SYSTEM_UNSUPPORTED)
         template = {
             "tokenize": False,
             "return_dict": False,
-            "add_generation_prompt": add_generation_prompt,
+            "chat_template": chat_template.source,
+            **template_options(
+                reasoning_effort=prompt.reasoning_effort,
+                preserve_thinking=prompt.preserve_thinking,
+                tools=prompt.tools,
+                add_generation_prompt=add_generation_prompt,
+            ),
         }
-        if prompt.reasoning_effort is not None:
-            template["enable_thinking"] = prompt.reasoning_effort != "none"
-            if prompt.reasoning_effort != "none":
-                template["reasoning_effort"] = prompt.reasoning_effort
-        if prompt.preserve_thinking is not None:
-            template["preserve_thinking"] = prompt.preserve_thinking
-        if prompt.tools:
-            template["tools"] = prompt.tools
         with self.latencies.measure("images"):
             images = self._prepare_images(prompt.messages, check_context=check_context)
         remaining_request_time(deadline)

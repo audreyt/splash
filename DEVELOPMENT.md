@@ -230,6 +230,41 @@ cached under `models/.metadata`, keyed by the size and digest of each source
 GGUF, the SHA-256 of `gguf.py` and the `tokenizers` version; publication is
 atomic and entries are hash-checked on use.
 
+Request preparation merges the leading system and developer messages into one
+system message, joined by a blank line: Responses instructions and developer
+items, or an Anthropic `system` and a leading system message. A system message
+after that, as agent clients send when they change instructions during a
+conversation, renders where it occurs as a system turn in the template's own
+markup.
+
+`server/chat_templates.py` probes each of the tokenizer's templates, including
+each named variant such as `tool_use`, once at startup, right after the
+tokenizer is validated and before the native runtime starts, so a tokenizer
+without a template Splash can serve stops startup before any weights load. The
+probe renders a canary conversation whose later system message carries a
+marker. Startup logs the outcome (`Chat template · ...`), and `/status` reports
+it as `chat_template.later_system`:
+
+- `native`: the marker renders in place; the template is used unchanged.
+- `patched`: the template rejects the message (the official Qwen templates
+  raise) or drops it (Unsloth's Qwen3.6 GGUF template skips it). Jinja's own
+  parser finds the construct responsible: the `raise_exception` in the message
+  loop's system branch, or the loop condition that excludes system messages.
+  The patch renders the message there with the block the template gives a
+  leading system message, and is kept only if ordinary conversations (with and
+  without tools, every reasoning effort from `none` to `max`, preserved
+  thinking, tool calls and results, images), each rendered as requests render
+  it, are byte-identical and the canary renders in place.
+- `unsupported`: the template renders the message out of place, has no single
+  such construct, renders something before its system block (such as a BOS
+  token), or its patch failed a probe. A request with a later system message
+  fails with a 400 instead of losing it.
+
+Every request, including image placeholder, token-count and judgment
+(`/v1/judgments`, `/v1/systemone`) rendering, uses the template chosen at
+startup; tokenizer files and the tokenizer object are unchanged. The probe's
+upstream fixtures are in `dev/tests/fixtures/chat_templates/`.
+
 ### Vision
 
 Vision comes from the target repository: MLX's `vision_tower.*` tensors,
@@ -516,6 +551,9 @@ properties use JSON-encoded values; statically typed strings retain raw text.
 Remote schema references and parameter names containing XML delimiters are
 unsupported. Hosted search is unsupported; configure client-owned tools such as
 MCP. Omitted effort uses the model default.
+`response_format` constrains generation and validates final output; it does not
+inject formatting instructions into the prompt. Clients should describe their
+output requirements in their own messages.
 Hidden thinking signatures use a persistent user key; imported encrypted thinking
 preserves visible history without recovering the private reasoning.
 
@@ -558,6 +596,7 @@ Proxy consumers can use these fields; additional fields may be added:
 | `metrics.decode_tokens_per_second` | Aggregate native decode throughput, not a request's end-to-end rate |
 | `maximum_context_tokens` | Declared context limit; available memory may limit admission |
 | `vision`, `input_modalities` | Whether image and PDF input is accepted; `false` and `["text"]` after `--language-only` |
+| `chat_template.later_system` | `native`, `patched` or `unsupported`: how system messages after the first render (per name for named templates) |
 
 `GET /metrics` exposes the same counters in Prometheus text format. Both endpoints
 require the API key when authentication is enabled. Consumers should tolerate

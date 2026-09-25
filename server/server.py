@@ -39,10 +39,11 @@ if __package__:
         stream_chunk,
     )
     from .backend import NativeBackend, remaining_request_time
+    from .chat_templates import REASONING_EFFORTS, ChatTemplateError, ChatTemplates
     from .constraints import ConstraintFactory, validate_tokenizer
     from .diagnostics import log_unexpected, print_request, print_status
     from .errors import APIError, ContextLengthError
-    from .frontend import REASONING_EFFORTS, Frontend, validate_served_model_name
+    from .frontend import Frontend, validate_served_model_name
     from .http_security import authenticate, validate_api_key, validate_headers
     from .latency import RequestLatency
     from .metrics import (
@@ -79,10 +80,11 @@ else:
         stream_chunk,
     )
     from backend import NativeBackend, remaining_request_time
+    from chat_templates import REASONING_EFFORTS, ChatTemplateError, ChatTemplates
     from constraints import ConstraintFactory, validate_tokenizer
     from diagnostics import log_unexpected, print_request, print_status
     from errors import APIError, ContextLengthError
-    from frontend import REASONING_EFFORTS, Frontend, validate_served_model_name
+    from frontend import Frontend, validate_served_model_name
     from http_security import authenticate, validate_api_key, validate_headers
     from latency import RequestLatency
     from metrics import (
@@ -1965,6 +1967,8 @@ def main():
             args.tokenizer, local_files_only=True, trust_remote_code=False
         )
         validate_tokenizer(tokenizer)
+        chat_templates = ChatTemplates(tokenizer)
+        print_status(f"Chat template · {chat_templates.describe()}")
         runtime = engine_runtime.MultiplexedRuntime(
             _native_command(args),
             startup_timeout=NATIVE_START_TIMEOUT,
@@ -2001,6 +2005,7 @@ def main():
             args.request_timeout,
             readiness.max_concurrent_requests,
             constraint_factory=constraint_factory,
+            chat_templates=chat_templates,
             max_image_pixels=args.max_image_pixels,
             thinking_codec=thinking_codec,
             served_model_names=args.served_model_name,
@@ -2018,7 +2023,11 @@ def main():
         mode = "" if readiness.vision else " · language only"
         print_status(f"Ready · {args.model} · context {context}{mode} · {address}")
         server.serve_forever()
-    except (engine_runtime.EngineUnhealthy, ThinkingKeyError) as error:
+    except (
+        engine_runtime.EngineUnhealthy,
+        ThinkingKeyError,
+        ChatTemplateError,
+    ) as error:
         print_status(f"Error · {error}", error=True)
         raise SystemExit(1) from None
     except OSError as error:

@@ -18,6 +18,8 @@ from server import protocol as wire
 
 class FakeTokenizer:
     backend_tokenizer = None
+    # Rendering ignores it; only the startup probe reads it.
+    chat_template = "{%- for message in messages %}{{- message.content }}{%- endfor %}"
 
     @staticmethod
     def decode(token_ids, **_kwargs):

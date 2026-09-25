@@ -30,6 +30,7 @@ from server import output as model_output
 from server import protocol as native_wire
 from server import server as api
 from server.api_shapes import _namespace_alias, normalize_responses_input
+from server.chat_templates import ChatTemplates
 from server.thinking import ThinkingCodec
 from server.tool_schema import MAX_JSON_NESTING, _grammar_compatible_schema
 
@@ -115,6 +116,15 @@ class FakeTokenizer:
         self.backend_tokenizer = _byte_backend(self.fragments)
         self.templates = []
 
+    # Requests render as a fixed generation prefix; the source only has to be
+    # a template ChatTemplates can probe at startup.
+    chat_template = (
+        "{%- for message in messages %}"
+        "{{- '<|im_start|>' + message.role + '\\n' + message.content + '<|im_end|>\\n' }}"
+        "{%- endfor %}"
+        "{%- if add_generation_prompt %}{{- '<|im_start|>assistant\\n' }}{%- endif %}"
+    )
+
     def apply_chat_template(self, messages, **kwargs):
         self.templates.append((messages, kwargs))
         rendered = "<|im_start|>assistant\n<think>\n"
@@ -167,12 +177,19 @@ class TemplateTokenizer(FakeTokenizer):
         self.renderer = PreTrainedTokenizerFast(tokenizer_object=self.backend_tokenizer)
         self.renderer.chat_template = template
 
+    @property
+    def chat_template(self):
+        return self.renderer.chat_template
+
     def apply_chat_template(self, messages, **kwargs):
         self.templates.append((messages, kwargs))
         return self.renderer.apply_chat_template(messages, **kwargs)
 
 
 class BlockingTokenizer(FakeTokenizer):
+    """Holds each render until released, once armed after its chat template
+    was probed."""
+
     def __init__(self):
         super().__init__()
         self.lock = threading.Lock()
@@ -181,8 +198,11 @@ class BlockingTokenizer(FakeTokenizer):
         self.active = 0
         self.maximum_active = 0
         self.calls = 0
+        self.armed = False
 
     def apply_chat_template(self, messages, **kwargs):
+        if not self.armed:
+            return super().apply_chat_template(messages, **kwargs)
         with self.lock:
             self.calls += 1
             self.active += 1
@@ -548,8 +568,9 @@ def main_args(**overrides):
 def make_frontend(
     tokenizer, *args, constraint_factory=None, thinking_codec=None, **options
 ):
-    """A frontend over the tokenizer. Unless a test passes its own,
-    generation is unconstrained and thinking is signed with a fresh key."""
+    """A frontend over the tokenizer, with its chat templates probed as
+    startup probes them. Unless a test passes its own, generation is
+    unconstrained and thinking is signed with a fresh key."""
     if constraint_factory is None:
         constraint_factory = PassThroughConstraintFactory()
     if thinking_codec is None:
@@ -558,6 +579,7 @@ def make_frontend(
         tokenizer,
         *args,
         constraint_factory=constraint_factory,
+        chat_templates=ChatTemplates(tokenizer),
         thinking_codec=thinking_codec,
         **options,
     )
@@ -608,6 +630,10 @@ class Harness:
             vision=vision,
             **frontend_options,
         )
+        # The chat templates are probed once, before the frontend is built;
+        # keep only request renders in a recording tokenizer.
+        if isinstance(getattr(self.tokenizer, "templates", None), list):
+            self.tokenizer.templates.clear()
         self.server = api.FrontendServer(
             (host, 0),
             self.app,
@@ -1646,8 +1672,9 @@ class ServerTest(unittest.TestCase):
         """Renders one image placeholder per image part like the pinned
         Qwen template, with pad id 50."""
 
-        def get_chat_template(self, **kwargs):
-            return api_shapes.IMAGE_PAD_TOKEN
+        # Stands for the template: rendering emits the source per image part,
+        # so the frontend's image render marker appears where it replaced it.
+        chat_template = api_shapes.IMAGE_PAD_TOKEN
 
         def __call__(self, text, **kwargs):
             count = text.count(api_shapes.IMAGE_PAD_TOKEN)
@@ -1788,7 +1815,11 @@ class ServerTest(unittest.TestCase):
                 ],
             },
         ]
-        template = {"tokenize": True, "return_dict": False}
+        template = {
+            "tokenize": True,
+            "return_dict": False,
+            "chat_template": tokenizer.chat_template,
+        }
         baseline = tokenizer.apply_chat_template(messages, **template)
         pad_id = tokenizer.convert_tokens_to_ids(api_shapes.IMAGE_PAD_TOKEN)
         all_pads = [i for i, token in enumerate(baseline) if token == pad_id]
@@ -1828,7 +1859,11 @@ class ServerTest(unittest.TestCase):
 
     def test_image_render_marker_is_stable_across_requests(self):
         app = self.harness(FakeRuntime(), tokenizer=self.ImagePadTokenizer()).app
-        template = {"tokenize": False, "return_dict": False}
+        template = {
+            "tokenize": False,
+            "return_dict": False,
+            "chat_template": app.tokenizer.chat_template,
+        }
         app._render_image_tokens([self._image_message()], template)
         app._render_image_tokens([self._image_message()], template)
         first_source = app.tokenizer.templates[-2][1]["chat_template"]
@@ -3467,6 +3502,7 @@ class ServerTest(unittest.TestCase):
                 api.AutoTokenizer, "from_pretrained", return_value=tokenizer
             ),
             mock.patch.object(api, "validate_tokenizer"),
+            mock.patch.object(api, "ChatTemplates"),
             mock.patch.object(
                 api.engine_runtime, "MultiplexedRuntime", return_value=runtime
             ) as runtime_type,
@@ -3474,7 +3510,7 @@ class ServerTest(unittest.TestCase):
                 api, "NativeBackend", return_value=backend
             ) as backend_type,
             mock.patch.object(api, "ConstraintFactory", return_value=object()),
-            mock.patch.object(api, "Frontend", return_value=object()) as app_type,
+            mock.patch.object(api, "Frontend", return_value=mock.Mock()) as app_type,
             mock.patch.object(api, "FrontendServer", side_effect=bind),
             mock.patch.object(api.signal, "signal", side_effect=install),
             mock.patch("builtins.print"),
@@ -3533,6 +3569,7 @@ class ServerTest(unittest.TestCase):
                         api.AutoTokenizer, "from_pretrained", return_value=object()
                     ),
                     mock.patch.object(api, "validate_tokenizer"),
+                    mock.patch.object(api, "ChatTemplates") as templates_type,
                     mock.patch.object(
                         api.engine_runtime,
                         "MultiplexedRuntime",
@@ -3551,6 +3588,16 @@ class ServerTest(unittest.TestCase):
                 ):
                     api.main()
                 self.assertIs(app_type.call_args.kwargs["vision"], vision)
+                self.assertIs(
+                    app_type.call_args.kwargs["chat_templates"],
+                    templates_type.return_value,
+                )
+                describe = templates_type.return_value.describe
+                describe.assert_called_once_with()
+                self.assertIn(
+                    mock.call(f"Chat template · {describe.return_value}"),
+                    status.call_args_list,
+                )
                 self.assertIn(
                     mock.call(
                         "Ready · test-model · context 128K"
@@ -3573,6 +3620,7 @@ class ServerTest(unittest.TestCase):
                 api.AutoTokenizer, "from_pretrained", return_value=object()
             ),
             mock.patch.object(api, "validate_tokenizer"),
+            mock.patch.object(api, "ChatTemplates"),
             mock.patch.object(
                 api.engine_runtime, "MultiplexedRuntime", return_value=runtime
             ),
@@ -3588,6 +3636,31 @@ class ServerTest(unittest.TestCase):
         server.server_close.assert_called_once_with()
         backend.close.assert_called_once()
         self.assertIn("Error · late", stderr.getvalue())
+
+    def test_main_rejects_an_unservable_chat_template_before_starting_native(self):
+        server = mock.Mock()
+        with (
+            mock.patch.object(api, "parse_args", return_value=main_args()),
+            mock.patch.object(api, "load_thinking_key", return_value=None),
+            mock.patch.object(
+                api.AutoTokenizer,
+                "from_pretrained",
+                return_value=SimpleNamespace(chat_template=None),
+            ),
+            mock.patch.object(api, "validate_tokenizer"),
+            mock.patch.object(api.engine_runtime, "MultiplexedRuntime") as runtime,
+            mock.patch.object(api, "FrontendServer", return_value=server),
+            mock.patch.object(api.signal, "signal"),
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            self.assertRaisesRegex(SystemExit, "1"),
+        ):
+            api.main()
+        runtime.assert_not_called()
+        server.server_activate.assert_not_called()
+        server.server_close.assert_called_once_with()
+        self.assertIn(
+            "Error · the tokenizer defines no chat template", stderr.getvalue()
+        )
 
     def test_main_rejects_port_conflict_before_loading_or_starting_native(self):
         args = main_args(port=8000)
@@ -5531,6 +5604,7 @@ class ServerTest(unittest.TestCase):
     def test_reasoning_template_errors_do_not_silently_drop_effort(self):
         tokenizer = TemplateTokenizer(self.reasoning_template(efforts=("medium",)))
         app = make_frontend(tokenizer, None, "test-model", 128, 16, 1, 2, vision=True)
+        tokenizer.templates.clear()
         with self.assertRaises(api.APIError):
             app.prepare(self.body(reasoning_effort="high"))
         self.assertEqual(
@@ -5548,6 +5622,7 @@ class ServerTest(unittest.TestCase):
     def test_reasoning_effort_accepts_only_standard_protocol_values(self):
         tokenizer = FakeTokenizer()
         app = make_frontend(tokenizer, None, "test-model", 128, 16, 1, 2, vision=True)
+        tokenizer.templates.clear()
         for effort in ("", "on", "off", "ultra", True, 1, [], {}):
             with (
                 self.subTest(effort=effort),
@@ -5700,7 +5775,7 @@ class ServerTest(unittest.TestCase):
         self.assertIn("| answer)", grammar)
         self.assertIn("%json", grammar)
 
-    def test_structured_output_schema_is_visible_without_changing_input_history(self):
+    def test_structured_output_preserves_prompt_messages(self):
         harness = self.harness(FakeRuntime())
         schema = {
             "type": "object",
@@ -5721,13 +5796,7 @@ class ServerTest(unittest.TestCase):
                 original = json.dumps(body, sort_keys=True)
                 prompt = harness.app._prepare_prompt(body)
                 self.assertEqual(json.dumps(body, sort_keys=True), original)
-                self.assertEqual(prompt.messages[: len(system)], system)
-                self.assertEqual(prompt.messages[-1], body["messages"][-1])
-                instruction = prompt.messages[len(system)]
-                self.assertEqual(instruction["role"], "system")
-                self.assertEqual(
-                    json.loads(instruction["content"].split("\n", 1)[1]), schema
-                )
+                self.assertEqual(prompt.messages, body["messages"])
                 self.assertEqual(prompt.response_schema, schema)
                 self.assertIsNotNone(prompt.response_validator)
 
@@ -6059,6 +6128,7 @@ class ServerTest(unittest.TestCase):
             2,
             vision=True,
         )
+        tokenizer.armed = True
         results = []
         errors = []
 
@@ -6213,6 +6283,7 @@ class ServerTest(unittest.TestCase):
         app = make_frontend(
             FakeTokenizer(), None, "test-model", 128, 16, 10, 1, vision=True
         )
+        app.tokenizer.templates.clear()
         app.preparation_slots.acquire()
         try:
             with self.assertRaises(api.APIError) as error:
