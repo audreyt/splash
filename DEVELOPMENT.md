@@ -780,7 +780,8 @@ make install test-real test-http-real MODEL=mlx-community/Qwen3.8-27B-4bit
 
 `make check` needs no model weights. `make check-native-cpu` builds production
 and runs native CPU tests without a GPU; `make check-native-metal` requires a
-supported Metal device and runs the kernel tests under shader validation. They
+supported Metal device and runs the kernel tests under shader validation, and the Linear pipeline
+resource check without it. They
 include the preparation of small synthetic MLX, GGUF and vision sources and the
 GGUF kernels on synthetic tensors. Hosted CI runs CPU checks and sanitizers.
 

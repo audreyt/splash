@@ -1569,10 +1569,12 @@ void floatInstances(const char *metallib, const std::set<std::string_view> &kern
             "a plain decode kernel has no fp32 instance");
 }
 
-void pipelineCapabilities(const char *metallib, const DeviceCapabilities &capabilities) {
-  Linear linear(capabilities);
+// Every Linear pipeline a candidate plan of any family and core count
+// launches, with its threads per threadgroup: one pipeline never takes two
+// execution scopes. Device-free.
+std::map<std::string, uint32_t> pipelineScopes() {
   std::map<std::string, uint32_t> names{{"prefill_linear_q4_sums32", 256}};
-  const auto collect = [&](LinearWorkload workload) {
+  const auto collect = [&](const Linear &linear, LinearWorkload workload) {
     const bool plain = workload.phase == LinearPhase::Decode && workload.epilogue == LinearEpilogue::None;
     for (const auto &candidate : linear.candidates(workload)) {
       std::vector<LinearPlan> plans{candidate};
@@ -1587,13 +1589,28 @@ void pipelineCapabilities(const char *metallib, const DeviceCapabilities &capabi
         }
     }
   };
-  for (uint32_t lanes = 1; lanes <= 4; ++lanes)
-    for (const auto epilogue : {LinearEpilogue::None, LinearEpilogue::Residual,
-                               LinearEpilogue::GateUp})
-      collect({{16640, 5120}, lanes * 8, LinearPhase::Decode, epilogue});
-  for (const auto epilogue : {LinearEpilogue::None, LinearEpilogue::Residual,
-                             LinearEpilogue::UpWithGate})
-    collect({{16640, 5120}, 33, LinearPhase::Prefill, epilogue});
+  for (const uint32_t family : {9U, 10U, 11U})
+    for (const uint32_t cores : {0U, 10U, 16U, 20U, 40U, 80U}) {
+      const Linear linear = gpu(family, cores);
+      for (uint32_t lanes = 1; lanes <= 4; ++lanes)
+        for (const auto epilogue : {LinearEpilogue::None, LinearEpilogue::Residual,
+                                   LinearEpilogue::GateUp})
+          collect(linear, {{16640, 5120}, lanes * 8, LinearPhase::Decode, epilogue});
+      for (const auto epilogue : {LinearEpilogue::None, LinearEpilogue::Residual,
+                                 LinearEpilogue::UpWithGate})
+        collect(linear, {{16640, 5120}, 33, LinearPhase::Prefill, epilogue});
+    }
+  return names;
+}
+
+// This device's resources for every pipeline of pipelineScopes: its static
+// threadgroup memory fits the device, its thread limit covers the plans'
+// threads, and SIMD groups are 32 wide. Shader validation instruments the
+// pipelines and inflates these numbers, so this runs without it.
+void pipelineCapabilities(const char *metallib, const DeviceCapabilities &capabilities,
+                          const std::map<std::string, uint32_t> &names) {
+  require(!std::getenv("MTL_SHADER_VALIDATION"),
+          "the pipeline resource check inspects production pipelines: run it without MTL_SHADER_VALIDATION");
   id<MTLDevice> device = MTLCreateSystemDefaultDevice();
   NSError *error = nil;
   id<MTLLibrary> library = [device newLibraryWithURL:
@@ -1623,7 +1640,14 @@ void pipelineCapabilities(const char *metallib, const DeviceCapabilities &capabi
 
 int main(int argc, char **argv) {
   try {
-    require(argc == 2, "usage: linear-plan <production.metallib|--cpu>");
+    const bool capabilities = argc == 3 && std::string_view(argv[1]) == "--capabilities";
+    require(argc == 2 || capabilities,
+            "usage: linear-plan <production.metallib|--cpu|--capabilities production.metallib>");
+    if (capabilities) {
+      metal::MetalBackend backend(argv[2]);
+      pipelineCapabilities(argv[2], backend.capabilities(), pipelineScopes());
+      return 0;
+    }
     baselinePlans();
     affinePolicyLaws();
     ggufPlans();
@@ -1638,6 +1662,8 @@ int main(int argc, char **argv) {
     planContracts(10, 16, widestCandidates);
     require(widestCandidates == Linear::kMaximumCandidates,
             "no covered workload reaches the Linear candidate bound");
+    // The resources behind these scopes are --capabilities' check.
+    static_cast<void>(pipelineScopes());
     if (std::string_view(argv[1]) == "--cpu") {
       std::cout << "Linear CPU plans: PASS\n";
       return 0;
@@ -1646,10 +1672,6 @@ int main(int argc, char **argv) {
     floatInstances(argv[1], plainKernels);
     ggufProjectionMatrix(backend);
     Linear linear(backend.capabilities());
-    // Instrumented shader builds can report additional validation storage;
-    // inspect production requirements in the ordinary/API-validation run.
-    if (!std::getenv("MTL_SHADER_VALIDATION"))
-      pipelineCapabilities(argv[1], backend.capabilities());
     for (const LinearMatrix matrix : {LinearMatrix{512, 256}, LinearMatrix{768, 768},
                                       LinearMatrix{16640, 5120}, LinearMatrix{12544, 2048},
                                       LinearMatrix{5120, 17408},
