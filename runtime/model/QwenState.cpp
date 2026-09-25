@@ -179,6 +179,13 @@ uint32_t QwenStateStorage::idleRings() const noexcept {
   return static_cast<uint32_t>(pool_->rings.size());
 }
 
+uint64_t QwenStateStorage::activationBytes() const noexcept {
+  const uint64_t cells = std::tuple_size_v<decltype(Slot::gdn)>;
+  const uint64_t missing = cells - std::min<uint64_t>(pool_->cells.size(), cells);
+  return missing * layout_.target.cellBytes() +
+         (pool_->rings.empty() ? layout_.draft.ringBytes() : 0);
+}
+
 void QwenStateStorage::updateLengths(uint32_t index,
                                      QwenLogicalLengths lengths) {
   validateLengths(lengths, false);

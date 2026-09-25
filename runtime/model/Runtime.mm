@@ -463,15 +463,27 @@ struct Runtime::Impl {
     }
     // Keep cache references alive during admission. Only misses need the
     // encoder; cached rows can be injected after its arena has been reclaimed.
-    if (bytes && !vision) {
+    const uint64_t encoderBytes =
+        bytes && !vision ? ops::Vision::scratchBytes(
+                               package.vision.tensors.layout,
+                               maximumImagePatches)
+                         : 0;
+    // At the budget the engine retries a denied admission after each reclaim
+    // step. Checking the whole attempt first, with the GDN cells and draft
+    // ring the lane needs beyond the idle pool, keeps a denial from building
+    // and dropping the encoder arena and image buffers every time.
+    if (bytes) {
+      if (auto admission = admitAllocation(
+              encoderBytes + bytes + states.activationBytes(), [] {});
+          !admission)
+        return admission;
+    }
+    if (encoderBytes) {
       std::unique_ptr<ops::Vision> candidate;
-      const auto admission = admitAllocation(
-              ops::Vision::scratchBytes(package.vision.tensors.layout,
-                                        maximumImagePatches),
-              [&] {
-                candidate = std::make_unique<ops::Vision>(
-                    backend, package.vision.tensors, maximumImagePatches);
-              });
+      const auto admission = admitAllocation(encoderBytes, [&] {
+        candidate = std::make_unique<ops::Vision>(
+            backend, package.vision.tensors, maximumImagePatches);
+      });
       if (!admission)
         return admission;
       vision = std::move(candidate);

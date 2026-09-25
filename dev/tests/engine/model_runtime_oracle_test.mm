@@ -381,12 +381,36 @@ struct AllocationFault final {
 
 void requireAtomicImageAdmission(model::Runtime &executor,
                                  metal::MetalBackend &backend,
+                                 const model::ModelPackage &model,
                                  AllocationFault &fault) {
   const uint64_t originalBytes = backend.memoryStats().allocatedBytes;
   const uint64_t originalSubmissions = backend.submissionCount();
   EngineRequest image = makeRequest(93, {1, 2}, 1);
   image.images = {{0, 1, 2, 2, 139, 431}};
   image.imagePixels.resize(image.images.front().pixelBytes());
+  // At the budget the engine retries a denied admission after each reclaim
+  // step. With no encoder and an empty state pool, a request whose lane does
+  // not fit is refused before its encoder arena or image buffers are built.
+  {
+    const ImageSpan &span = image.images.front();
+    const uint64_t attemptBytes =
+        ops::Vision::scratchBytes(model.vision.tensors.layout,
+                                  ops::kMaximumImagePatches) +
+        span.pixelBytes() +
+        uint64_t{ops::Vision::embeddingRows({span.gridHeight, span.gridWidth})} *
+            model.vision.tensors.layout.outputHiddenSize * sizeof(uint16_t) +
+        model.stateLayout().activeCellBytes();
+    fault.remainingBytes = attemptBytes - 1;
+    const StateAdmission denied = executor.begin(image.modelView());
+    const uint64_t unspent = fault.remainingBytes;
+    fault = {};
+    require(!denied.granted() &&
+                denied.failure == StateFailure::MemoryPressure &&
+                unspent == attemptBytes - 1 &&
+                backend.memoryStats().allocatedBytes == originalBytes,
+            "an image request whose lane did not fit built its encoder or "
+            "image buffers");
+  }
   for (bool resume : {false, true}) {
     EngineRequest text = image;
     text.images.clear();
@@ -440,9 +464,10 @@ void requireAtomicImageAdmission(model::Runtime &executor,
         require(executor.begin(keeper.modelView()).granted(),
                 "shared vision setup failed");
       const uint64_t before = backend.memoryStats().allocatedBytes;
-      // Fresh vision, image pixels/embeddings, two GDN cells, draft ring.
-      // With an existing encoder, only the last four allocations remain.
-      for (int boundary = 0; boundary < (sharedVision ? 4 : 5); ++boundary) {
+      // The check of the whole attempt, fresh vision, image pixels/embeddings,
+      // two GDN cells, draft ring. With an existing encoder, the check and
+      // the last four allocations remain.
+      for (int boundary = 0; boundary < (sharedVision ? 5 : 6); ++boundary) {
         for (bool throwing : {false, true}) {
           fault = {boundary, throwing};
           bool threw = false;
@@ -551,16 +576,17 @@ void requireImageRowsAfterReclaim(model::Runtime &executor,
           "cached image required more than its fresh request state");
 
   // A mixed hit/miss must keep the cached rows while admitting new resources.
-  // Fail at the encoder, image buffers and first state cell, including an
-  // exception after allocation, and leave both the cache and live request intact.
-  // Only the admitted attempt counts its cache hit as a reuse.
+  // Fail at the check of the whole attempt, the encoder, image buffers and
+  // first state cell, including an exception after allocation, and leave both
+  // the cache and live request intact. Only the admitted attempt counts its
+  // cache hit as a reuse.
   EngineRequest mixed = request;
   mixed.id = 97;
   mixed.images.push_back({80, 16, 8, 8, 157, 439});
   mixed.imagePixels.resize(2 * request.imagePixels.size());
   const uint64_t beforeMixed = backend.memoryStats().allocatedBytes;
   const uint64_t reusedBeforeMixed = executor.telemetry().imageEmbeddingReuses;
-  for (int boundary : {0, 1, 2}) {
+  for (int boundary : {0, 1, 2, 3}) {
     for (bool throwing : {false, true}) {
       fault = {boundary, throwing};
       bool threw = false;
@@ -827,7 +853,7 @@ int main(int argc, char **argv) {
     MemoryGovernor governor(backend, elasticGrowthCeiling, hostReserveBytes);
     AllocationFault allocationFault;
     const metal::AllocationAdmission admission =
-        [admit = governor.allocationAdmission(), &allocationFault](
+        [admit = governor.allocationAdmission(), &allocationFault, &backend](
             uint64_t bytes, const std::function<void()> &allocate) {
           if (bytes > allocationFault.remainingBytes)
             return false;
@@ -841,9 +867,13 @@ int main(int argc, char **argv) {
           }
           if (allocationFault.remaining > 0)
             --allocationFault.remaining;
+          // Only allocations spend the budget: the runtime's check of a
+          // whole image attempt allocates nothing.
+          const uint64_t before = backend.memoryStats().allocatedBytes;
           if (!admit(bytes, allocate))
             return false;
-          allocationFault.remainingBytes -= bytes;
+          allocationFault.remainingBytes -=
+              backend.memoryStats().allocatedBytes - before;
           return true;
         };
     metal::AllocationFailure kvAdmissionFailure = metal::AllocationFailure::None;
@@ -909,7 +939,7 @@ int main(int argc, char **argv) {
     // The engine refuses image requests to a model without vision before they
     // reach the runtime, which treats one as a broken invariant.
     if (model.descriptor.hasVision()) {
-      requireAtomicImageAdmission(executor, backend, allocationFault);
+      requireAtomicImageAdmission(executor, backend, model, allocationFault);
       for (uint32_t page : pageRange(120, 4))
         require(static_cast<bool>(pages.ensureResident(page)), "image oracle KV backing is unavailable");
       requireImageRowsAfterReclaim(executor, backend, states, model, allocationFault);
