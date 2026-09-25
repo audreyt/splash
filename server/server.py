@@ -7,7 +7,7 @@ import os
 import queue
 import re
 import secrets
-import selectors
+import select
 import signal
 import socket
 import sys
@@ -113,7 +113,12 @@ DEFAULT_REQUEST_BODY_BUDGET = 512 * 1024 * 1024
 MAX_CONTEXT_TOKENS = 262144
 HTTP_IO_TIMEOUT = 30.0
 HTTP_UPLOAD_BYTES_PER_SECOND = 512 * 1024
-CLIENT_DISCONNECT_POLL = 0.01
+# How long a response sent before the request body was read waits for the
+# client to finish uploading it.
+HTTP_UNREAD_BODY_DRAIN_SECONDS = 2.0
+# Native events wake a waiting request at once; this only bounds how late a
+# client disconnect is noticed.
+CLIENT_DISCONNECT_POLL = 0.1
 SSE_KEEPALIVE_SECONDS = 2.0
 NATIVE_START_TIMEOUT = 600.0
 ROOT = Path(__file__).parents[1]
@@ -151,6 +156,7 @@ class FrontendHandler(BaseHTTPRequestHandler):
 
     def setup(self):
         self._response_started = False
+        self._unread_body = False
         self._last_sse_write = time.monotonic()
         super().setup()
         self.connection.settimeout(self.server.io_timeout)
@@ -168,7 +174,23 @@ class FrontendHandler(BaseHTTPRequestHandler):
 
     def finish(self):
         self._header_timer.cancel()
+        if self._unread_body:
+            self._discard_unread_body()
         super().finish()
+
+    def _discard_unread_body(self):
+        # Closing with request bytes unread resets the connection, and the
+        # reset can destroy the response before a client still uploading
+        # reads it. Half-close, then discard the upload for a bounded time.
+        deadline = time.monotonic() + HTTP_UNREAD_BODY_DRAIN_SECONDS
+        try:
+            self.connection.shutdown(socket.SHUT_WR)
+            while (remaining := deadline - time.monotonic()) > 0:
+                self.connection.settimeout(remaining)
+                if not self.rfile.read1(65536):
+                    return
+        except OSError:
+            pass
 
     def log_message(self, format, *args):
         pass
@@ -184,6 +206,11 @@ class FrontendHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             self.send_error(505, "HTTP version not supported")
             return False
+        # finish() drains a body that no handler read before responding.
+        self._unread_body = bool(
+            self.headers.get_all("Content-Length")
+            or self.headers.get_all("Transfer-Encoding")
+        )
         try:
             allowed_hosts = self.server.allowed_hosts | {
                 self.connection.getsockname()[0].lower()
@@ -333,6 +360,7 @@ class FrontendHandler(BaseHTTPRequestHandler):
                 if not chunk:
                     raise APIError(400, "request body ended before Content-Length")
                 payload.extend(chunk)
+            self._unread_body = False
         finally:
             self.connection.settimeout(self.server.io_timeout)
         text = payload.decode(json.detect_encoding(payload), "surrogatepass")
@@ -468,10 +496,12 @@ class FrontendHandler(BaseHTTPRequestHandler):
             self._safe_error(APIError(404, "not found", "not_found"))
             return
         if not prompt_only and not self.app.backend.can_submit():
+            failure = self.app.backend.engine_error
             self._safe_error(
                 APIError(
                     529 if systemone else 503,
-                    "engine is recovering; retry shortly",
+                    "engine is recovering; retry shortly"
+                    + (f" (last failure: {failure})" if failure else ""),
                     "engine_recovering",
                 ),
                 anthropic,
@@ -759,18 +789,19 @@ class FrontendHandler(BaseHTTPRequestHandler):
                 return event
 
     def _client_disconnected(self):
+        # A poll object holds no descriptor: running out of descriptors
+        # must not read as a disconnect.
+        poller = select.poll()
+        poller.register(self.connection, select.POLLIN)
         try:
-            with selectors.DefaultSelector() as selector:
-                selector.register(self.connection, selectors.EVENT_READ)
-                readable = selector.select(0)
             # The body is already consumed and every response closes the
             # connection. Drain unexpected trailing bytes so they cannot hide EOF.
-            return bool(readable) and not self.connection.recv(
+            return bool(poller.poll(0)) and not self.connection.recv(
                 65536, socket.MSG_DONTWAIT
             )
         except BlockingIOError:
             return False
-        except (OSError, ValueError):
+        except ConnectionError:
             return True
 
     def _finalize_content(self, content, job, has_tools, incomplete, projector=None):
@@ -1940,6 +1971,7 @@ def _interrupt(_signum, _frame):
 def main():
     args = parse_args()
     server = None
+    runtime = None
     backend = None
     # A server started in the background from a non-interactive shell inherits
     # SIGINT as ignored and Python then leaves it alone; install both stop
@@ -2024,7 +2056,7 @@ def main():
         print_status(f"Ready · {args.model} · context {context}{mode} · {address}")
         server.serve_forever()
     except (
-        engine_runtime.EngineUnhealthy,
+        engine_runtime.EngineRuntimeError,
         ThinkingKeyError,
         ChatTemplateError,
     ) as error:
@@ -2037,14 +2069,20 @@ def main():
         pass
     finally:
         # main owns this process. Keep stop signals idempotent through child
-        # cleanup and interpreter teardown, including after this function returns.
+        # cleanup and interpreter teardown, including after this function
+        # returns, except that a second Ctrl+C during cleanup stops the engine
+        # without waiting for its paced release of memory.
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(
+            signal.SIGINT,
+            signal.SIG_IGN if runtime is None else lambda *_: runtime.kill(),
+        )
         try:
             if backend is not None:
                 print_status("Stopping · releasing engine resources")
                 backend.close()
         finally:
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
             if server is not None:
                 server.server_close()
 

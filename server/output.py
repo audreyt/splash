@@ -15,7 +15,6 @@ if __package__:
         PARAMETER_CLOSE,
         PARAMETER_OPEN,
         THINK_END,
-        TOOL_CALL_CLOSE,
         TOOL_CALL_OPEN,
         json_value,
         raw_string_schema,
@@ -30,7 +29,6 @@ else:
         PARAMETER_CLOSE,
         PARAMETER_OPEN,
         THINK_END,
-        TOOL_CALL_CLOSE,
         TOOL_CALL_OPEN,
         json_value,
         raw_string_schema,
@@ -440,8 +438,6 @@ def _typed_tool_value(value, schema, root):
         return parsed
     if string_schema[0] == "raw" or value in string_schema[1]:
         return value
-    if value == "null" and None in string_schema[1]:
-        return None
     return parsed
 
 
@@ -505,18 +501,6 @@ def parse_tool_calls(text, request_id, policy=None):
         )
     content.append(text[cursor:])
     content = "".join(content)
-    if calls and any(
-        tag in content
-        for tag in (
-            TOOL_CALL_OPEN,
-            TOOL_CALL_CLOSE,
-            "<function=",
-            "</function>",
-            PARAMETER_OPEN,
-            "</parameter>",
-        )
-    ):
-        raise APIError(500, "model returned malformed tool XML", "invalid_model_output")
     return ("" if calls and not content.strip() else content), calls
 
 

@@ -495,12 +495,7 @@ class FakeRuntime:
             tuple(plan.logits) if plan.logits is not None else (),
         )
         call.complete(
-            result=api.engine_runtime.GenerationResult(
-                call.request_id,
-                None,
-                tuple(token for batch in plan.batches for token in batch),
-                done,
-            )
+            result=api.engine_runtime.GenerationResult(call.request_id, None, done)
         )
 
     def close(self):
@@ -3475,6 +3470,7 @@ class ServerTest(unittest.TestCase):
         tokenizer = object()
         handlers = {}
         order = []
+        closing_handlers = []
 
         def install(signum, handler):
             if handler is api._interrupt:
@@ -3482,7 +3478,10 @@ class ServerTest(unittest.TestCase):
                 return signal.SIG_DFL
             handlers[signum] = handler
             self.assertIn(signum, (signal.SIGTERM, signal.SIGINT))
-            self.assertEqual(handler, signal.SIG_IGN)
+            if handler is not signal.SIG_IGN:
+                self.assertEqual(signum, signal.SIGINT)
+
+        backend.close.side_effect = lambda: closing_handlers.append(dict(handlers))
 
         def serve():
             self.assertEqual(set(handlers), {signal.SIGTERM, signal.SIGINT})
@@ -3519,6 +3518,12 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(
             handlers, {signal.SIGTERM: signal.SIG_IGN, signal.SIGINT: signal.SIG_IGN}
         )
+        # While the engine releases its memory, a second Ctrl+C stops it now.
+        (closing,) = closing_handlers
+        self.assertIs(closing[signal.SIGTERM], signal.SIG_IGN)
+        runtime.kill.assert_not_called()
+        closing[signal.SIGINT](signal.SIGINT, None)
+        runtime.kill.assert_called_once_with()
         runtime_type.assert_called_once_with(
             [
                 "splash",
@@ -4513,6 +4518,52 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(error["code"], "invalid_model_output")
         self.assertNotIn("<tool_call>", payload.decode())
 
+    def test_prose_beside_a_call_can_name_tool_tags(self):
+        # The grammar keeps only <tool_call> out of prose; other tags are text.
+        tokenizer = FakeTokenizer()
+        tokenizer.fragments[40] = "Fix the </parameter> and <function= handling.\n"
+        tokenizer.backend_tokenizer = _byte_backend(tokenizer.fragments)
+        tools = [{"type": "function", "function": {"name": "weather"}}]
+        prose = tokenizer.fragments[40] + "\n"
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                harness = self.harness(
+                    FakeRuntime(Plan([[40], [5]])), tokenizer=tokenizer
+                )
+                status, _, payload = harness.request(
+                    "POST",
+                    "/v1/chat/completions",
+                    self.body(tools=tools, stream=stream, reasoning_effort="none"),
+                )
+                self.assertEqual(status, 200, payload)
+                if stream:
+                    chunks = [
+                        json.loads(line[6:])
+                        for line in payload.decode().splitlines()
+                        if line.startswith("data: {")
+                    ]
+                    self.assertFalse(any("error" in chunk for chunk in chunks))
+                    deltas = [chunk["choices"][0]["delta"] for chunk in chunks]
+                    content = "".join(delta.get("content") or "" for delta in deltas)
+                    names = [
+                        call["function"]["name"]
+                        for delta in deltas
+                        for call in delta.get("tool_calls", [])
+                        if "name" in call["function"]
+                    ]
+                    reason = chunks[-1]["choices"][0]["finish_reason"]
+                else:
+                    choice = json.loads(payload)["choices"][0]
+                    content = choice["message"]["content"]
+                    names = [
+                        call["function"]["name"]
+                        for call in choice["message"]["tool_calls"]
+                    ]
+                    reason = choice["finish_reason"]
+                self.assertEqual(
+                    (content, names, reason), (prose, ["weather"], "tool_calls")
+                )
+
     def test_incomplete_tool_prefix_preserves_whitespace_without_xml(self):
         plans = [Plan([[20], [19]], reason="length") for _ in range(4)]
         harness = self.harness(FakeRuntime(*plans))
@@ -5082,10 +5133,9 @@ class ServerTest(unittest.TestCase):
             {"type": "function", "function": {"name": "f"}},
             {"type": "function", "function": {"name": "g"}},
         ]
-        app.prepare(self.body(tools=tools, tool_choice="none"))
-        self.assertNotIn("tools", tokenizer.templates[-1][1])
         named = {"type": "function", "function": {"name": "g"}}
         cases = (
+            ({"tool_choice": "none"}, False, True, "tail"),
             ({"tool_choice": "required"}, True, True, "(tool_0 | tool_1)+"),
             ({"tool_choice": named}, True, True, "(tool_0)+"),
             ({"parallel_tool_calls": False}, False, False, "(tool_0 | tool_1)? tail"),
@@ -5110,6 +5160,23 @@ class ServerTest(unittest.TestCase):
                     ],
                     list(policy.schemas),
                 )
+
+    def test_stop_is_refused_only_while_a_tool_can_be_called(self):
+        tokenizer = FakeTokenizer()
+        backend = backend_api.NativeBackend(FakeRuntime(), tokenizer)
+        self.addCleanup(backend.close)
+        app = make_frontend(
+            tokenizer, backend, "test-model", 128, 16, 1, 2, vision=True
+        )
+        tools = [{"type": "function", "function": {"name": "f"}}]
+        job, _, _ = app.prepare(self.body(tools=tools, tool_choice="none", stop=["x"]))
+        self.assertEqual(job.tool_policy.schemas, {})
+        for choice in ("auto", "required"):
+            with (
+                self.subTest(tool_choice=choice),
+                self.assertRaisesRegex(api.APIError, "stop cannot be combined"),
+            ):
+                app.prepare(self.body(tools=tools, tool_choice=choice, stop=["x"]))
 
     def test_tool_names_accept_long_mcp_names_up_to_128_characters(self):
         runtime = FakeRuntime(Plan([[4]]))
@@ -8399,26 +8466,32 @@ class MessageNormalizationTest(unittest.TestCase):
         call = messages[1]["tool_calls"][0]["function"]
         self.assertEqual(call["name"], "shell")
         self.assertEqual(call["arguments"], truncated)
-        complete = api_shapes.normalize_messages(
-            [
-                {"role": "user", "content": "x"},
-                {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
+        # Some providers send a call without arguments as "".
+        for arguments, expected in (('{"a": 1}', {"a": 1}), ("", {}), (" \n", {})):
+            with self.subTest(arguments=arguments):
+                complete = api_shapes.normalize_messages(
+                    [
+                        {"role": "user", "content": "x"},
                         {
-                            "type": "function",
-                            "function": {"name": "shell", "arguments": '{"a": 1}'},
-                        }
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "shell",
+                                        "arguments": arguments,
+                                    },
+                                }
+                            ],
+                        },
                     ],
-                },
-            ],
-            vision=True,
-        )
-        self.assertEqual(
-            complete[1]["tool_calls"][0]["function"]["arguments"], {"a": 1}
-        )
-        for malformed in ('{"x": 1,}', '{"x": NaN}', "not json"):
+                    vision=True,
+                )
+                self.assertEqual(
+                    complete[1]["tool_calls"][0]["function"]["arguments"], expected
+                )
+        for malformed in ('{"x": 1,}', '{"x": NaN}', "not json", '"abc"', "[1]", "5"):
             with self.subTest(arguments=malformed), self.assertRaises(api.APIError):
                 api_shapes.normalize_messages(
                     [

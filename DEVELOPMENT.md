@@ -25,7 +25,12 @@ model and its draft, and prepares the weights once
 revision ([Revisions](#revisions)). Legacy Splash packages remain loadable
 ([Legacy Splash packages](#legacy-splash-packages)). Public repositories need
 no login; private or gated ones need `HF_TOKEN` or `hf auth login`. Ctrl+C
-stops serving; stop before upgrading.
+stops serving, and a second Ctrl+C stops the engine at once; stop before
+upgrading.
+
+An engine that fails is restarted at once, and failed restarts back off from
+1 to 16 seconds. Meanwhile generation requests get 503 `engine_recovering`,
+whose message names the last failure.
 
 Use `--max-context 100K` or `--max-memory 28G` to set optional limits. Memory
 limits cap Metal allocations, not combined process RSS. Agents must already be
@@ -564,9 +569,13 @@ importing the HTTP entry module.
 Tools can be combined with structured answers. Tool argument framing resolves
 local references and projects object fields through schema composition. The
 original schema validates complete arguments, including cross-field conditions,
-dependencies and property-count rules that framing alone cannot enforce. Extra
-properties use JSON-encoded values; statically typed strings retain raw text.
-Remote schema references and parameter names containing XML delimiters are
+dependencies and property-count rules that framing alone cannot enforce; array
+item bounds and `multipleOf` above 64 are left to that validation as well, and
+the framed schemas of one request are limited to 16 MiB. Extra properties use
+JSON-encoded values; statically typed strings retain raw text.
+`tool_choice: "none"` renders the tools like any other choice and only
+prevents calls. Remote schema references, parameter names containing XML
+delimiters and `unevaluatedProperties` combined with `patternProperties` are
 unsupported. Hosted search is unsupported; configure client-owned tools such as
 MCP. Omitted effort uses the model default.
 `response_format` constrains generation and validates final output; it does not
@@ -615,6 +624,7 @@ Proxy consumers can use these fields; additional fields may be added:
 | `maximum_context_tokens` | Declared context limit; available memory may limit admission |
 | `vision`, `input_modalities` | Whether image and PDF input is accepted; `false` and `["text"]` after `--language-only` |
 | `chat_template.later_system` | `native`, `patched` or `unsupported`: how system messages after the first render (per name for named templates) |
+| `transport.recovering`, `transport.error` | The engine is restarting; `error` names its failure or the last failed restart |
 
 `GET /metrics` exposes the same counters in Prometheus text format. Both endpoints
 require the API key when authentication is enabled. Consumers should tolerate
@@ -651,7 +661,10 @@ process and survive a native engine restart.
 HTTP bodies require Content-Length, and browser
 Origin must match Host. `--allowed-host` permits additional hostnames. Request
 logs omit bodies; full crash traces require explicit `SPLASH_CRASH_TRACE=1` and
-can contain private conversation data.
+can contain private conversation data. A frame over 16 MiB, such as a request
+with large images, is kept only as a marker with its size and SHA-256
+(`omitted_frames` counts them), and a trace missing engine input that way
+cannot be replayed.
 
 Requests sharing a cold prefix can wait for a resident request's planned recovery
 point, then enter through the ordinary cache restore path. Waiting requests hold
