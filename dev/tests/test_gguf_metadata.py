@@ -605,6 +605,24 @@ class GgufMetadataTests(unittest.TestCase):
             ),
         )
 
+    def test_a_layer_count_no_family_has_is_rejected_before_screening(self):
+        # Screening lists every tensor of every layer a header claims; only
+        # the family bounds the count.
+        fake = self.gguf_repository(vision=False)
+        values = fixture(native=True)
+        values["qwen35moe.block_count"] = 2**32 - 1
+        write_gguf(fake.remote / GGUF_REPO / ("a" * 40) / "model-Q4_K_M.gguf", values)
+        with (
+            mock.patch.object(
+                gguf, "loaded_tensors", side_effect=AssertionError("screened")
+            ),
+            self.assertRaisesRegex(
+                models.ModelError, "no supported model has this architecture"
+            ),
+        ):
+            self.prepare(selection(self.root, GGUF_REPO + ":Q4_K_M"))
+        self.assertEqual(fake.downloads, [])
+
     def test_an_unsupported_projector_normalization_is_rejected_before_download(self):
         fake = self.gguf_repository(vision=False)
         values = vision_fixture()

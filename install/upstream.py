@@ -156,6 +156,8 @@ def _gguf_target(repo, variant, language_only):
         )
     with repo.open(name) as stream:
         header = gguf.Metadata(stream, tensors=True)
+    # The family bounds the layers whose tensors the screening lists.
+    families.family_for(gguf.model_config(header))
     gguf.require_loadable(header)
     files = {"target/" + name: name}
     vision_header = None
