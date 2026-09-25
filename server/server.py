@@ -113,6 +113,9 @@ DEFAULT_REQUEST_BODY_BUDGET = 512 * 1024 * 1024
 MAX_CONTEXT_TOKENS = 262144
 HTTP_IO_TIMEOUT = 30.0
 HTTP_UPLOAD_BYTES_PER_SECOND = 512 * 1024
+# How long a response sent before the request body was read waits for the
+# client to finish uploading it.
+HTTP_UNREAD_BODY_DRAIN_SECONDS = 2.0
 CLIENT_DISCONNECT_POLL = 0.01
 SSE_KEEPALIVE_SECONDS = 2.0
 NATIVE_START_TIMEOUT = 600.0
@@ -151,6 +154,7 @@ class FrontendHandler(BaseHTTPRequestHandler):
 
     def setup(self):
         self._response_started = False
+        self._unread_body = False
         self._last_sse_write = time.monotonic()
         super().setup()
         self.connection.settimeout(self.server.io_timeout)
@@ -168,7 +172,23 @@ class FrontendHandler(BaseHTTPRequestHandler):
 
     def finish(self):
         self._header_timer.cancel()
+        if self._unread_body:
+            self._discard_unread_body()
         super().finish()
+
+    def _discard_unread_body(self):
+        # Closing with request bytes unread resets the connection, and the
+        # reset can destroy the response before a client still uploading
+        # reads it. Half-close, then discard the upload for a bounded time.
+        deadline = time.monotonic() + HTTP_UNREAD_BODY_DRAIN_SECONDS
+        try:
+            self.connection.shutdown(socket.SHUT_WR)
+            while (remaining := deadline - time.monotonic()) > 0:
+                self.connection.settimeout(remaining)
+                if not self.rfile.read1(65536):
+                    return
+        except OSError:
+            pass
 
     def log_message(self, format, *args):
         pass
@@ -184,6 +204,11 @@ class FrontendHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             self.send_error(505, "HTTP version not supported")
             return False
+        # finish() drains a body that no handler read before responding.
+        self._unread_body = bool(
+            self.headers.get_all("Content-Length")
+            or self.headers.get_all("Transfer-Encoding")
+        )
         try:
             allowed_hosts = self.server.allowed_hosts | {
                 self.connection.getsockname()[0].lower()
@@ -333,6 +358,7 @@ class FrontendHandler(BaseHTTPRequestHandler):
                 if not chunk:
                     raise APIError(400, "request body ended before Content-Length")
                 payload.extend(chunk)
+            self._unread_body = False
         finally:
             self.connection.settimeout(self.server.io_timeout)
         text = payload.decode(json.detect_encoding(payload), "surrogatepass")
