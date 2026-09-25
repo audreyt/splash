@@ -325,7 +325,7 @@ std::unique_ptr<RuntimeBootstrap> RuntimeBootstrap::start(
   } catch (const metal::MetalAllocationError &error) {
     base.resourceFailure = resourceAllocationFailure(error.failure());
     fail(std::move(base), RuntimeBootstrapStage::ModelCreation,
-         std::string("modelRuntime creation failed: ") + error.what());
+         std::string("native loop creation failed: ") + error.what());
   } catch (const std::exception &error) {
     fail(std::move(base), RuntimeBootstrapStage::ModelCreation,
          std::string("native loop creation failed: ") + error.what());
