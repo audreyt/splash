@@ -164,6 +164,14 @@ STRING_SCHEMA_POST_VALIDATION_KEYWORDS = {
 }
 
 
+# The grammar compiler expands these keywords into work proportional to their
+# values: a rule per required or optional array item, a state per divisor
+# residue. A tiny schema with a huge bound would exhaust memory, so larger
+# bounds are left to validation of the complete output.
+GRAMMAR_BOUND_KEYWORDS = ("minItems", "maxItems", "multipleOf")
+MAX_GRAMMAR_BOUND = 64
+
+
 def _grammar_compatible_schema(schema):
     """Guide generation with supported constraints; validate the original."""
     output = copy.deepcopy(schema)
@@ -171,6 +179,19 @@ def _grammar_compatible_schema(schema):
         if isinstance(node, dict):
             node.pop("propertyNames", None)
             node.pop("pattern", None)
+    # A local reference can point anywhere in the document, so any object may
+    # be compiled as a schema.
+    pending = [output]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            for key in GRAMMAR_BOUND_KEYWORDS:
+                bound = value.get(key)
+                if isinstance(bound, (int, float)) and bound > MAX_GRAMMAR_BOUND:
+                    del value[key]
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
     if isinstance(output, dict):
         output["x-guidance"] = {"lenient": True}
     return output

@@ -190,6 +190,75 @@ class SchemaFallbackTests(unittest.TestCase):
         self.assertEqual(schema, original)
         self.assertEqual(policy.schemas["test"], original)
 
+    def test_huge_bounds_never_reach_the_grammar_compiler(self):
+        # Compiling a bound costs memory in proportion to its value. A local
+        # reference can make any object a schema, even literal data.
+        huge = 10**9
+        for keyword, kind in (
+            ("minItems", "array"),
+            ("maxItems", "array"),
+            ("multipleOf", "integer"),
+        ):
+            bounded = {"type": kind, keyword: huge}
+            schema = {
+                "type": "object",
+                "properties": {
+                    "value": bounded,
+                    "linked": {"$ref": "#/x-stash"},
+                    "literal": {"$ref": "#/properties/fixed/const"},
+                    "fixed": {"const": bounded},
+                },
+                "x-stash": bounded,
+            }
+            policy = self.policy(schema)
+            for grammar in (
+                tool_schema.tool_grammar(policy, False),
+                tool_schema.json_grammar(schema, False),
+                tool_schema.tool_grammar(policy, False, schema),
+            ):
+                with self.subTest(keyword=keyword, grammar=grammar[:60]):
+                    self.assertNotIn(str(huge), grammar)
+                    self.assertFalse(LLMatcher.validate_grammar(grammar, self.guidance))
+
+    def test_bounds_above_the_grammar_ceiling_are_validated_on_output(self):
+        limit = tool_schema.MAX_GRAMMAR_BOUND
+        violations = (
+            ("maxItems", "array", lambda bound: [0] * (bound + 1)),
+            ("minItems", "array", lambda bound: [0]),
+            ("multipleOf", "integer", lambda bound: 1),
+        )
+        for (keyword, kind, violation), bound in product(
+            violations, (limit, limit + 1)
+        ):
+            value = violation(bound)
+            schema = {
+                "type": "object",
+                "properties": {"value": {"type": kind, keyword: bound}},
+                "required": ["value"],
+            }
+            with self.subTest(keyword=keyword, bound=bound):
+                policy = self.policy(schema)
+                matcher = LLMatcher(
+                    self.guidance, tool_schema.tool_grammar(policy, False)
+                )
+                text = self.call(json.dumps(value, separators=(",", ":")))
+                tokens = self.tokenizer.encode(text).ids
+                accepted = (
+                    matcher.validate_tokens(tokens) == len(tokens)
+                    and matcher.consume_tokens(tokens)
+                    and matcher.is_accepting()
+                )
+                self.assertEqual(accepted, bound > limit)
+                call = {
+                    "function": {
+                        "name": "test",
+                        "arguments": json.dumps({"value": value}),
+                    }
+                }
+                with self.assertRaises(api.APIError) as caught:
+                    model_output.validate_tool_calls([call], policy)
+                self.assertEqual(caught.exception.code, "invalid_model_output")
+
     def test_deferred_assertions_across_protocols_and_streaming(self):
         guidance = self.guidance
 
