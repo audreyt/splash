@@ -195,6 +195,13 @@ void commitBehindWatchdogGate(id command, SEL selector) {
     reinterpret_cast<void (*)(id, SEL)>(originalCommandCommit)(command, selector);
 }
 
+std::atomic<unsigned> commits{0};
+IMP originalCountedCommit = nullptr;
+void countCommit(id command, SEL selector) {
+    ++commits;
+    reinterpret_cast<void (*)(id, SEL)>(originalCountedCommit)(command, selector);
+}
+
 MTLCommandBufferStatus terminalCommandStatus(id command, SEL selector) {
     if ((__bridge void *)command == failedCommand.load())
         return MTLCommandBufferStatusError;
@@ -393,10 +400,14 @@ void delayMappingSignal(id queue, SEL selector, id<MTLSharedEvent> event, uint64
 void backendDeferredSubmission(const std::string &metallibPath) {
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     id<MTL4CommandQueue> queue = [device newMTL4CommandQueue];
+    // A command buffer of the class the backend commits.
+    id<MTLCommandBuffer> command = [[device newCommandQueue] commandBuffer];
     constexpr uint64_t tile = MetalBackend::kPlacementSparsePageBytes;
     // Exercise the real submission/ticket path, not just the event helper.
     for (const std::string mode : {"resume", "stop", "timeout", "teardown-unmap"}) {
-        auto backend = std::make_unique<MetalBackend>(metallibPath);
+        // "timeout" gives up on the mapping after 500 ms instead of 30 s.
+        auto backend = std::make_unique<MetalBackend>(
+            metallibPath, 120.0, mode == "timeout" ? 500 : 30000);
         auto sparse = backend->allocatePlacementSparseBuffer(tile, tile, "gated-map");
         auto heap = backend->allocatePlacementHeap(tile, tile, "gated-heap");
         SparseMapping mapping{sparse, 0, tile, 0};
@@ -420,9 +431,10 @@ void backendDeferredSubmission(const std::string &metallibPath) {
                 "mapping test gate was not installed");
         if (mode == "teardown-unmap") {
             backend->unmapSparse({&mapping, 1}, std::move(heap));
-            const auto start = std::chrono::steady_clock::now();
+            // The unmap (event 4) waits on the sparse queue for the withheld
+            // mapping event: teardown must return before it completes.
             backend.reset();
-            require(std::chrono::steady_clock::now() - start < std::chrono::seconds(2),
+            require(delayedMappingEvent.signaledValue < 4,
                     "backend teardown waited for the mapping queue");
             require([submissionGate waitUntilSignaledValue:1 timeoutMS:5000],
                     "test mapping did not complete");
@@ -434,6 +446,10 @@ void backendDeferredSubmission(const std::string &metallibPath) {
         std::atomic<unsigned> callbacks{0};
         std::promise<void> completion;
         auto notified = completion.get_future();
+        commits = 0;
+        MethodReplacement counting(command, @selector(commit),
+                                   reinterpret_cast<IMP>(countCommit));
+        originalCountedCommit = counting.original;
         auto ticket = backend->submitAsync(dispatch, [&](uint64_t) {
             if (++callbacks == 1) completion.set_value();
         });
@@ -446,15 +462,17 @@ void backendDeferredSubmission(const std::string &metallibPath) {
         requireBackendError([&] { (void)backend->submitAsync(dispatch); },
                             "deferred command did not hold the submission gate");
         if (mode == "resume") {
-            std::this_thread::sleep_for(std::chrono::seconds(6));
-            require(!ticket.ready() && callbacks == 0,
-                    "backend completed a command before its mapping");
+            // The command waits on the host and reaches the GPU only once its
+            // mapping completes, so no GPU queue timeout can run out on it.
+            require(!ticket.ready() && callbacks == 0 && commits == 0,
+                    "backend committed a command before its mapping");
             require([submissionGate waitUntilSignaledValue:1 timeoutMS:5000],
                     "test mapping did not complete");
             delayedMappingEvent.signaledValue = 3;
             (void)ticket.wait();
             requireNotifiedOnce();
-            require(backend->healthy(), "resumed ticket poisoned the backend");
+            require(backend->healthy() && commits == 1,
+                    "resumed ticket poisoned the backend");
             auto *words = static_cast<uint32_t *>(readback.contents());
             for (uint32_t i = 0; i < count; ++i)
                 require(words[i] == seed + i, "deferred command produced wrong output");
@@ -462,11 +480,8 @@ void backendDeferredSubmission(const std::string &metallibPath) {
             backend->drainSparseUnmaps();
             awaitSparseRelease(*backend, 0);
         } else {
-            const auto start = std::chrono::steady_clock::now();
             if (mode == "stop") backend->stop();
-            const auto deadline = start + std::chrono::seconds(mode == "stop" ? 2 : 35);
-            while (!ticket.ready() && std::chrono::steady_clock::now() < deadline)
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            requireNotifiedOnce();
             require(ticket.ready(), "stopped/timed-out mapping did not finish its ticket");
             try {
                 (void)ticket.wait();
@@ -476,7 +491,6 @@ void backendDeferredSubmission(const std::string &metallibPath) {
                 require(message.find(mode == "stop" ? "stopped before" : "wait exceeded") !=
                             std::string::npos, "deferred failure lost its cause: " + message);
             }
-            requireNotifiedOnce();
             require(!backend->healthy(), "failed ticket did not poison the backend");
             requireBackendError([&] { (void)backend->submitAsync(dispatch); },
                                 "stopped backend accepted new work");
@@ -486,7 +500,7 @@ void backendDeferredSubmission(const std::string &metallibPath) {
             delayedMappingEvent.signaledValue = 3;
             require([delayedMappingEvent waitUntilSignaledValue:3 timeoutMS:5000],
                     "map ownership did not survive backend teardown");
-            require(static_cast<uint32_t *>(readback.contents())[0] == 0,
+            require(commits == 0 && static_cast<uint32_t *>(readback.contents())[0] == 0,
                     "cancelled deferred command ran on the GPU");
         }
         std::cout << "PASS backend deferred submission " << mode << '\n';

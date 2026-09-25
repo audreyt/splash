@@ -107,8 +107,6 @@ bool multiplyOverflows(uint64_t left, uint64_t right) {
 
 constexpr uint64_t kPlacementSparsePageBytes = MetalBackend::kPlacementSparsePageBytes;
 constexpr MTLSparsePageSize kPlacementSparsePageSize = MTLSparsePageSize64;
-constexpr NSUInteger kSparseUnmapTimeoutMilliseconds = 30000;
-constexpr NSUInteger kSparseMapTimeoutMilliseconds = 30000;
 // Entries of a kernel's buffer argument table on every Apple GPU family.
 constexpr uint32_t kBufferArgumentEntries = 31;
 
@@ -458,6 +456,7 @@ struct MetalBackend::Impl {
         pipelines;
 
     DeviceCapabilities capabilities;
+    NSUInteger sparseTimeoutMilliseconds = 0;
     std::shared_ptr<AllocationAccounting> accounting =
         std::make_shared<AllocationAccounting>();
     std::shared_ptr<BackendAsyncState> asyncState =
@@ -515,13 +514,13 @@ struct MetalBackend::Impl {
     void awaitSparseUnmapLocked() {
         if (!pendingUnmap) return;
         if (![sparseEvent waitUntilSignaledValue:pendingUnmap->eventValue
-                                       timeoutMS:kSparseUnmapTimeoutMilliseconds]) {
+                                       timeoutMS:sparseTimeoutMilliseconds]) {
             std::ostringstream details;
             details << "sparse unmapping timed out: event="
                     << pendingUnmap->eventValue
                     << " signaled=" << sparseEvent.signaledValue
                     << " pending_map=" << pendingSparseEventValue
-                    << " waited_ms=" << kSparseUnmapTimeoutMilliseconds;
+                    << " waited_ms=" << sparseTimeoutMilliseconds;
             std::string message = details.str();
             markUnhealthy(message);
             throw MetalBackendError(message);
@@ -696,9 +695,14 @@ CommandTiming CommandTicket::wait() {
     return timing;
 }
 
-MetalBackend::MetalBackend(std::string metallibPath, double commandTimeoutSeconds)
+MetalBackend::MetalBackend(std::string metallibPath, double commandTimeoutSeconds,
+                           uint32_t sparseTimeoutMilliseconds)
     : impl_(std::make_unique<Impl>()) {
     impl_->asyncState->commandWatchdog = CommandWatchdog(commandTimeoutSeconds);
+    if (!sparseTimeoutMilliseconds) {
+        throw MetalBackendError("sparse mapping timeout must be positive");
+    }
+    impl_->sparseTimeoutMilliseconds = sparseTimeoutMilliseconds;
     @autoreleasepool {
         if (metallibPath.empty()) {
             throw MetalBackendError("metallib path must not be empty");
@@ -1165,11 +1169,11 @@ bool MetalBackend::sparseUnmapPending() noexcept {
     const double now = std::chrono::duration<double>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     if (issued > 0.0 &&
-        (now - issued) * 1000.0 > double(kSparseUnmapTimeoutMilliseconds)) {
+        (now - issued) * 1000.0 > double(impl_->sparseTimeoutMilliseconds)) {
         try {
             impl_->markUnhealthy(
                 "sparse unmapping exceeded " +
-                std::to_string(kSparseUnmapTimeoutMilliseconds) +
+                std::to_string(impl_->sparseTimeoutMilliseconds) +
                 " ms without completing");
         } catch (...) {
         }
@@ -1457,9 +1461,10 @@ CommandTicket MetalBackend::submitCommandAsync(
         observer->mapWaitStarted.store(mapWaitStart, std::memory_order_relaxed);
         observer->mapWaitEvent.store(sparseEventValue, std::memory_order_release);
     }
-    afterMetalEvent(event, sparseEventValue, kSparseMapTimeoutMilliseconds,
+    const NSUInteger timeout = impl_->sparseTimeoutMilliseconds;
+    afterMetalEvent(event, sparseEventValue, timeout,
         [command, event, observer, ticketState, sparseEventValue,
-         pendingMap, mapWaitStart, wallStart](bool signaled) {
+         pendingMap, mapWaitStart, wallStart, timeout](bool signaled) {
             if (pendingMap) {
                 const double waited = steadySeconds() - mapWaitStart;
                 observer->lastMapWaitSeconds.store(waited, std::memory_order_relaxed);
@@ -1476,8 +1481,7 @@ CommandTicket MetalBackend::submitCommandAsync(
                         << ticketState->sequence << ": event " << sparseEventValue
                         << ", signaled " << event.signaledValue;
                 if (!signaled)
-                    message << ", wait exceeded "
-                            << kSparseMapTimeoutMilliseconds << " ms";
+                    message << ", wait exceeded " << timeout << " ms";
                 CommandTiming timing;
                 timing.wallSeconds = std::chrono::duration<double>(
                     std::chrono::steady_clock::now() - wallStart).count();

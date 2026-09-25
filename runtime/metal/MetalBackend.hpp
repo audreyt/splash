@@ -263,8 +263,11 @@ private:
 // Permits exactly one submitted-but-not-applied command on its command queue.
 class MetalBackend final {
 public:
+  // A sparse map a command waits for, or an unmap, still pending after
+  // sparseTimeoutMilliseconds fails the command or the backend.
   explicit MetalBackend(std::string metallibPath,
-                        double commandTimeoutSeconds = 120.0);
+                        double commandTimeoutSeconds = 120.0,
+                        uint32_t sparseTimeoutMilliseconds = 30000);
   ~MetalBackend();
   // Invoked before allocations and submissions; may throw to stop bootstrap.
   void setOperationGuard(std::function<void()> guard);

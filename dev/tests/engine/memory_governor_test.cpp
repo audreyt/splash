@@ -18,7 +18,7 @@ MetalMemoryStats statistics;
 } // namespace
 
 struct MetalBackend::Impl {};
-MetalBackend::MetalBackend(std::string, double)
+MetalBackend::MetalBackend(std::string, double, uint32_t)
     : impl_(std::make_unique<Impl>()) {}
 MetalBackend::~MetalBackend() = default;
 MetalMemoryStats MetalBackend::memoryStats() const noexcept {
