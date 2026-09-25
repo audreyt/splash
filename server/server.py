@@ -7,7 +7,7 @@ import os
 import queue
 import re
 import secrets
-import selectors
+import select
 import signal
 import socket
 import sys
@@ -116,7 +116,9 @@ HTTP_UPLOAD_BYTES_PER_SECOND = 512 * 1024
 # How long a response sent before the request body was read waits for the
 # client to finish uploading it.
 HTTP_UNREAD_BODY_DRAIN_SECONDS = 2.0
-CLIENT_DISCONNECT_POLL = 0.01
+# Native events wake a waiting request at once; this only bounds how late a
+# client disconnect is noticed.
+CLIENT_DISCONNECT_POLL = 0.1
 SSE_KEEPALIVE_SECONDS = 2.0
 NATIVE_START_TIMEOUT = 600.0
 ROOT = Path(__file__).parents[1]
@@ -785,18 +787,19 @@ class FrontendHandler(BaseHTTPRequestHandler):
                 return event
 
     def _client_disconnected(self):
+        # A poll object holds no descriptor: running out of descriptors
+        # must not read as a disconnect.
+        poller = select.poll()
+        poller.register(self.connection, select.POLLIN)
         try:
-            with selectors.DefaultSelector() as selector:
-                selector.register(self.connection, selectors.EVENT_READ)
-                readable = selector.select(0)
             # The body is already consumed and every response closes the
             # connection. Drain unexpected trailing bytes so they cannot hide EOF.
-            return bool(readable) and not self.connection.recv(
+            return bool(poller.poll(0)) and not self.connection.recv(
                 65536, socket.MSG_DONTWAIT
             )
         except BlockingIOError:
             return False
-        except (OSError, ValueError):
+        except ConnectionError:
             return True
 
     def _finalize_content(self, content, job, has_tools, incomplete, projector=None):
