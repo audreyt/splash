@@ -21,9 +21,10 @@ machine, which must be otherwise idle:
   every entry the baseline prepared from the model (prepared.compare). Equal
   identities share every entry, which then holds by construction.
 
-The candidate's own benchmark invariants must hold too. The result is
-<output dir>/backend-regression.json with each round's benchmark output beside
-it; the exit status is nonzero on any failure.
+The candidate's own benchmark invariants must hold too, and the baseline must
+be another build: one with the candidate's build_id compares nothing. The
+result is <output dir>/backend-regression.json with each round's benchmark
+output beside it; the exit status is nonzero on any failure.
 """
 
 from __future__ import annotations
@@ -230,6 +231,7 @@ def summarize(rounds: list[dict], expect_output_change: bool) -> dict:
         raise RegressionError("rounds are not in ABBA order")
     failures = []
     baseline, candidate = [rounds[0], rounds[3]], [rounds[1], rounds[2]]
+    builds = {}
     for name, records in (("baseline", baseline), ("candidate", candidate)):
         identities = [
             {
@@ -243,8 +245,13 @@ def summarize(rounds: list[dict], expect_output_change: bool) -> dict:
             failures.append(
                 f"the {name} build or its loaded model changed between rounds"
             )
+        builds[name] = identities[0]["build_id"]
         if changed := differences(outputs(records[0]), outputs(records[1])):
             failures.append(f"the {name} build did not repeat its outputs: {changed}")
+    if builds["baseline"] == builds["candidate"]:
+        failures.append(
+            f"the baseline has the candidate's build_id {builds['baseline']}"
+        )
     places = {
         (identity.get("model_root"), identity.get("device"))
         for record in rounds

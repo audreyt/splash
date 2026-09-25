@@ -194,6 +194,20 @@ class BackendRegressionTests(unittest.TestCase):
             first, second, third, fourth = rounds()
             regression.summarize([first, fourth, second, third], False)
 
+    def test_a_baseline_with_the_candidates_build_id_fails(self):
+        # The candidate's checkout, or another build of its sources: the ABBA
+        # of identical builds passes every other rule.
+        def candidate_build(document):
+            document["build_id"] = "candidate"
+
+        summary = regression.summarize(
+            rounds({0: candidate_build, 3: candidate_build}), False
+        )
+        self.assertEqual(
+            summary["failures"], ["the baseline has the candidate's build_id candidate"]
+        )
+        self.assertFalse(summary["pass"])
+
     def test_candidate_invariants_fail_and_baseline_ones_are_recorded(self):
         def fails(document):
             document["performance_pass"] = False
