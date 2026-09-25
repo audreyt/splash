@@ -63,6 +63,18 @@ class AbbaTests(unittest.TestCase):
             with self.subTest(rounds=rounds), self.assertRaises(ValueError):
                 abba.compare_samples(rounds)
 
+    def test_invalid_samples_are_refused_wherever_they_fall(self):
+        # A median over a NaN is NaN or any sample, by the NaN's position.
+        for bad in (float("nan"), float("inf"), 0, -1.0, None, True):
+            for position in range(3):
+                samples = [100.0, 101.0]
+                samples.insert(position, bad)
+                with (
+                    self.subTest(samples=samples),
+                    self.assertRaisesRegex(ValueError, "samples"),
+                ):
+                    abba.compare_samples([samples, [100.0], [100.0], [100.0]])
+
     def test_invalid_medians_are_refused(self):
         for medians in (
             (0, 1, 1, 1),

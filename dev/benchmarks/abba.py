@@ -27,17 +27,20 @@ FAIL = "fail"
 INCONCLUSIVE = "inconclusive"
 
 
-def compare(r1: float, r2: float, r3: float, r4: float) -> dict:
-    """The verdict on the round medians R1 baseline, R2 candidate, R3
-    candidate and R4 baseline of a lower-is-better metric."""
-    rounds = (r1, r2, r3, r4)
-    if not all(
+def positive(value) -> bool:
+    return (
         isinstance(value, (int, float))
         and not isinstance(value, bool)
         and math.isfinite(value)
         and value > 0
-        for value in rounds
-    ):
+    )
+
+
+def compare(r1: float, r2: float, r3: float, r4: float) -> dict:
+    """The verdict on the round medians R1 baseline, R2 candidate, R3
+    candidate and R4 baseline of a lower-is-better metric."""
+    rounds = (r1, r2, r3, r4)
+    if not all(positive(value) for value in rounds):
         raise ValueError(f"ABBA round medians must be positive numbers: {rounds!r}")
     baseline = (r1 + r4) / 2
     candidate = (r2 + r3) / 2
@@ -63,10 +66,14 @@ def compare(r1: float, r2: float, r3: float, r4: float) -> dict:
 
 
 def compare_samples(rounds) -> dict:
-    """compare() of the medians of four rounds' samples, in ABBA order."""
+    """compare() of the medians of four rounds' samples, in ABBA order. Each
+    sample must be a positive number: with a NaN among them, the median is
+    NaN or an arbitrary sample, by the position of the NaN."""
     rounds = [list(samples) for samples in rounds]
     if len(rounds) != 4 or not all(rounds):
         raise ValueError("an ABBA comparison needs samples from four rounds")
+    if not all(positive(sample) for samples in rounds for sample in samples):
+        raise ValueError(f"ABBA samples must be positive numbers: {rounds!r}")
     return compare(*(statistics.median(samples) for samples in rounds))
 
 
