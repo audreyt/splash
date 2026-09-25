@@ -518,6 +518,10 @@ class MultiplexedRuntime:
         self._crash_trace = CrashTraceRing(
             self._command, enabled=os.environ.get("SPLASH_CRASH_TRACE") == "1"
         )
+        # Called with the failure once an engine that reached Ready has
+        # failed for any reason but close(). It runs, without locks, on the
+        # thread that saw the failure and must return quickly.
+        self.on_engine_failure: Callable[[EngineRuntimeError], None] | None = None
 
         if eager_start:
             self._ensure_process()
@@ -1302,6 +1306,7 @@ class MultiplexedRuntime:
             # kept, so its frames do not outlive the requests they ran for.
             failure = error.restate()
             self._terminal_error = failure
+            served = self._ready_message is not None
             self._ready_message = None
             attempt = self._startup_attempt
             if (
@@ -1339,6 +1344,13 @@ class MultiplexedRuntime:
                 except OSError:
                     pass
                 self._arm_kill_fallback(process)
+            listener = self.on_engine_failure
+            if served and listener and not isinstance(failure, RuntimeClosed):
+                # The failure is already delivered; a listener cannot change it.
+                try:
+                    listener(failure)
+                except Exception:
+                    pass
 
         return finish
 

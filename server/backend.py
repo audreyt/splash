@@ -276,6 +276,12 @@ class NativeBackend:
             daemon=True,
         )
         self.finalizer.start()
+        runtime.on_engine_failure = self._engine_failed
+
+    def _engine_failed(self, _error):
+        # Start the backed-off recovery now: an engine that fails while idle
+        # would otherwise reload only after the next request was refused.
+        self._ensure_background_status_refresh()
 
     def can_submit(self):
         with self.lock:

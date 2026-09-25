@@ -311,6 +311,16 @@ class ServerRecoveryTests(unittest.TestCase):
         self.assertEqual(runtime.pending_count, 0)
         self.assertEqual(factory.processes[0].stdin.messages(wire.RequestFrame), [])
 
+    def test_idle_engine_death_restarts_before_traffic_arrives(self):
+        factory = FakeFactory()
+        runtime = engine_runtime.MultiplexedRuntime(process_factory=factory)
+        backend = backend_api.NativeBackend(runtime, NativeTokenizer())
+        self.addCleanup(backend.close)
+        factory.processes[0].kill()
+        self.wait_until(lambda: len(factory.processes) == 2 and runtime.ready, 2)
+        self.assertEqual(runtime.restart_count, 1)
+        self.assertTrue(backend.can_submit())
+
     def test_startup_protocol_failure_ends_with_one_error_line(self):
         missing = READY_FEATURES & ~wire.ReadyFeature.MULTIPLEXING
         runtime_type = engine_runtime.MultiplexedRuntime
