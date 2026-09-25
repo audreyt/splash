@@ -121,9 +121,10 @@ constant constexpr uint kPrefillStages = 2 * GGUF_TILE_COLUMNS * GGUF_PREFILL_ST
 // than a 16-row plus an 8-row matmul per stage (0.207 vs 0.218 ms, Q4_K 12288 x 5120, DRAM-cold; 20-core: 0.173 vs
 // 0.203).
 // Gate/up runs as a gate pass (a) into the gate scratch and an up pass (g) whose epilogue applies silu(gate) to the bf16
-// up value, as the Apple9 register kernels do.
-template <class F, ushort Rows, GgufEpilogue Ep>
-inline void gguf_decode_tile(device bfloat *input, device uchar *w0, device uchar *w1, device uchar *meta, device bfloat *output,
+// up value, as the Apple9 register kernels do. The destination's type Out is bf16, or fp32 for the plain epilogue's
+// logits (a_f32, ops::Projection::destination).
+template <class F, ushort Rows, GgufEpilogue Ep, class Out>
+inline void gguf_decode_tile(device bfloat *input, device uchar *w0, device uchar *w1, device uchar *meta, device Out *output,
                              device coherent(device) float *partials, device atomic_uint *counters, device bfloat *aux,
                              constant GgufDecodeParams &p, uint2 group, uint simd_lane, uint simd_group,
                              threadgroup half *stage, threadgroup half2 *tl, threadgroup uint *arrival) {
@@ -140,13 +141,13 @@ inline void gguf_decode_tile(device bfloat *input, device uchar *w0, device ucha
     const ulong o = ulong(row) * p.out_stride + column0 + column;
     if constexpr (Ep == EpResidual) v += float(aux[o]);
     if constexpr (Ep == EpUpWithGate) v = float(bfloat(v)) * gguf_silu(float(aux[o]));
-    output[o] = bfloat(v);
+    output[o] = Out(v);
   });
 }
 // The staged decode kernels: grid (column tiles, K partitions), two simdgroups.
-template <class F, ushort Rows, GgufEpilogue Ep>
+template <class F, ushort Rows, GgufEpilogue Ep, class Out>
 kernel void gguf_decode(device bfloat *input [[buffer(0)]], device uchar *w0 [[buffer(1)]], device uchar *w1 [[buffer(2)]],
-                        device uchar *meta [[buffer(3)]], device bfloat *output [[buffer(4)]],
+                        device uchar *meta [[buffer(3)]], device Out *output [[buffer(4)]],
                         device coherent(device) float *partials [[buffer(5)]], device atomic_uint *counters [[buffer(6)]],
                         device bfloat *aux [[buffer(7)]], constant GgufDecodeParams &p [[buffer(8)]],
                         uint2 group [[threadgroup_position_in_grid]], uint simd_lane [[thread_index_in_simdgroup]],
@@ -158,14 +159,17 @@ kernel void gguf_decode(device bfloat *input [[buffer(0)]], device uchar *w0 [[b
   gguf_decode_tile<F, Rows, Ep>(input, w0, w1, meta, output, partials, counters, aux, p, group, simd_lane, simd_group,
                                 stage, tl, &arrival);
 }
-using GgufDecodeKernel = void(device bfloat *, device uchar *, device uchar *, device uchar *, device bfloat *,
+template <class Out>
+using GgufDecodeKernel = void(device bfloat *, device uchar *, device uchar *, device uchar *, device Out *,
                               device coherent(device) float *, device atomic_uint *, device bfloat *,
                               constant GgufDecodeParams &, uint2, uint, uint);
-#define GGUF_DECODE(F, f, R, ep, Ep) \
-  template [[host_name("gguf_decode_" #f "_m" #R "_" #ep)]] kernel GgufDecodeKernel gguf_decode<F, R, Ep>;
-#define GGUF_DECODE_ROWS(F, f, ep, Ep) GGUF_DECODE(F, f, 8, ep, Ep) GGUF_DECODE(F, f, 16, ep, Ep) GGUF_DECODE(F, f, 32, ep, Ep)
-#define GGUF_DECODE_FORMAT(F, f) \
-  GGUF_DECODE_ROWS(F, f, a, EpNone) GGUF_DECODE_ROWS(F, f, r, EpResidual) GGUF_DECODE_ROWS(F, f, g, EpUpWithGate)
+#define GGUF_DECODE(F, f, R, ep, Ep, Out) \
+  template [[host_name("gguf_decode_" #f "_m" #R "_" #ep)]] kernel GgufDecodeKernel<Out> gguf_decode<F, R, Ep, Out>;
+#define GGUF_DECODE_ROWS(F, f, ep, Ep, Out) \
+  GGUF_DECODE(F, f, 8, ep, Ep, Out) GGUF_DECODE(F, f, 16, ep, Ep, Out) GGUF_DECODE(F, f, 32, ep, Ep, Out)
+#define GGUF_DECODE_FORMAT(F, f)                                                                                  \
+  GGUF_DECODE_ROWS(F, f, a, EpNone, bfloat) GGUF_DECODE_ROWS(F, f, a_f32, EpNone, float)                          \
+  GGUF_DECODE_ROWS(F, f, r, EpResidual, bfloat) GGUF_DECODE_ROWS(F, f, g, EpUpWithGate, bfloat)
 QUANT_FORMATS(GGUF_DECODE_FORMAT)
 #undef GGUF_DECODE_FORMAT
 #undef GGUF_DECODE_ROWS

@@ -153,7 +153,7 @@ void sampling() {
     require(workspace.partialIdsBytes == count * 8 * 16 * 4 &&
                 workspace.partialValuesBytes == count * (8 + 16) * 16 * 4 &&
                 workspace.candidatesBytes == count * 16 * 4 &&
-                workspace.unaryBytes == count * 16 * 2 &&
+                workspace.unaryBytes == count * 16 * 4 &&
                 workspace.proposalProbabilitiesBytes == count * 16 * 4,
             "draft sampling workspace changed from the shipped 8-shard ABI");
   }

@@ -128,6 +128,9 @@ readQwenTargetWeights(metal::MetalBackend &backend, const Layout &layout, Files 
     result.finalNorm = format.norm(file, layout.hiddenSize, "final-norm");
     result.logitsProjection =
         format.projection(file, layout.vocabularySize, layout.hiddenSize, "logits");
+    // bf16 logits would round near-ties together: their spacing is 0.125 at
+    // logits of 16 to 32.
+    result.logitsProjection.destination = ops::FloatOutput::Float32;
     file.finish();
     result.files.push_back(file.record());
   }

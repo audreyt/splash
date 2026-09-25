@@ -184,9 +184,12 @@ uint64_t LinearPlan::downSumsBytes() const noexcept {
       ? uint64_t{storageRows()} * (workload_.matrix.outputSize / kQuantGroup) * 4 : 0;
 }
 
-LinearPlan::LinearPlan(LinearWorkload w, LinearConfig config)
-    : workload_(w), config_(config) {
+LinearPlan::LinearPlan(LinearWorkload w, LinearConfig config, FloatOutput destination)
+    : workload_(w), config_(config), destination_(destination) {
   validate(w);
+  if (destination == FloatOutput::Float32 &&
+      (w.phase != LinearPhase::Decode || w.epilogue != LinearEpilogue::None))
+    throw std::invalid_argument("an fp32 destination takes a plain decode projection");
   const bool ggufTile = config.tile == LinearTile::GgufStaged || config.tile == LinearTile::GgufRegister;
   if (ggufTile != (w.weightLayout == WeightLayout::Block32))
     throw std::invalid_argument("block projections run the GGUF tiles, affine ones the Q4 tiles");
@@ -482,12 +485,12 @@ LinearConfig Linear::baseline(LinearWorkload w) const {
 LinearPlan Linear::plan(LinearWorkload workload) const {
   return LinearPlan(workload, chosenConfiguration(choices_, workload, baseline(workload)));
 }
-LinearPlan Linear::plan(LinearWorkload workload, LinearConfig config) {
-  return LinearPlan(workload, config);
+LinearPlan Linear::plan(LinearWorkload workload, LinearConfig config, FloatOutput destination) {
+  return LinearPlan(workload, config, destination);
 }
 LinearPlan Linear::plan(LinearWorkload w, const Projection &p) const {
   w.weightLayout = p.layout();
-  return plan(w);
+  return LinearPlan(w, chosenConfiguration(choices_, w, baseline(w)), p.destination);
 }
 void Linear::setChoices(std::span<const LinearChoice> choices) {
   std::vector<LinearChoice> pending(choices.begin(), choices.end());
@@ -582,7 +585,7 @@ PreparedInput Linear::add(metal::CommandGraph &graph, LinearBuffers b,
     throw std::invalid_argument("a gate/up plan takes a gate projection and no other plan does");
   const uint64_t rows = selected.storageRows();
   requireBytes(b.input, rows * k * 2, "input");
-  requireBytes(b.output, rows * n * 2, "output");
+  requireBytes(b.output, rows * n * elementBytes(selected.destination()), "output");
   if (w.epilogue == LinearEpilogue::Residual) requireBytes(b.residual, rows * n * 2, "residual");
   requireBytes(b.sums, selected.sumsBytes(), "sums");
   requireBytes(b.gateScratch, selected.gateScratchBytes(), "gate scratch");
@@ -613,7 +616,7 @@ PreparedInput Linear::add(metal::CommandGraph &graph, LinearBuffers b,
                                              b.output, b.scratch.sums, b.scratch.partials, b.scratch.counters};
     if (gate) bindings.insert(bindings.end(), {weights.weights, weights.scales, weights.biases});
     else if (w.epilogue == LinearEpilogue::Residual) bindings.push_back(b.residual);
-    graph.add(std::string(selected.pipeline()), std::move(bindings),
+    graph.add(kernelInstance(selected.pipeline(), selected.destination()), std::move(bindings),
         Q4Params{n, k, selected.configuration().splits},
         {selected.configuration().groups, selected.configuration().splits,
          w.rows / SPLASH_TARGET_VERIFY_ROWS}, {128, 1, 1});
@@ -629,7 +632,7 @@ PreparedInput Linear::add(metal::CommandGraph &graph, LinearBuffers b,
           {selected.threadsPerThreadgroup(), 1, 1});
     else {
       const uint32_t groups = selected.configuration().groups;
-      graph.add(std::string(name), bindings, Q4Params{n, k, groups}, {groups, 1, 1},
+      graph.add(kernelInstance(name, selected.destination()), bindings, Q4Params{n, k, groups}, {groups, 1, 1},
           {selected.threadsPerThreadgroup(), 1, 1});
     }
   };

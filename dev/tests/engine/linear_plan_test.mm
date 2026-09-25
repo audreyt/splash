@@ -16,6 +16,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -731,6 +732,47 @@ Projection blockProjection(uint32_t n, uint32_t k, uint32_t segments) {
   return Projection(n, k, std::move(weights));
 }
 
+// fp32 destinations (the logits): the plan of a projection with an fp32
+// destination keeps the configuration, tile kernel, input table and scratch of
+// its bf16 plan on every family and core count, and only plain decode
+// workloads take one. Returns the kernels of the plain decode candidates,
+// whose fp32 instances floatInstances looks up.
+std::set<std::string_view> floatOutputPlans() {
+  const auto fp32 = [](Projection p) {
+    p.destination = FloatOutput::Float32;
+    return p;
+  };
+  std::set<std::string_view> kernels;
+  for (const uint32_t family : {9U, 10U, 11U})
+    for (uint32_t cores = 0; cores <= 128; ++cores) {
+      const Linear linear = gpu(family, cores);
+      for (const uint32_t n : {256U, 5120U, 16640U, 248320U})
+        for (const uint32_t k : {2048U, 5120U})
+          for (const Projection &p : {Projection(n, k, AffineWeights{}), blockProjection(n, k, 1)})
+            for (uint32_t lanes = 1; lanes <= 4; ++lanes) {
+              const LinearWorkload w{{n, k}, lanes * 8, LinearPhase::Decode, LinearEpilogue::None, p.layout()};
+              const LinearPlan bf16 = linear.plan(w, p), head = linear.plan(w, fp32(p));
+              if (head.configuration() != bf16.configuration() || head.destination() != FloatOutput::Float32 ||
+                  head.pipeline() != bf16.pipeline() || head.input() != bf16.input() ||
+                  head.storageRows() != bf16.storageRows() || !sameScratch(head.scratchSize(), bf16.scratchSize()))
+                broke("an fp32 plan differs from its bf16 plan", family, cores, w);
+              for (const LinearPlan &candidate : linear.candidates(w))
+                if (!candidate.pipeline().empty()) kernels.insert(candidate.pipeline());
+            }
+    }
+  std::vector<LinearWorkload> others{{{5120, 2048}, 8, LinearPhase::Decode, LinearEpilogue::Residual},
+                                     {{5120, 2048}, 8, LinearPhase::Decode, LinearEpilogue::GateUp}};
+  for (const auto epilogue : {LinearEpilogue::None, LinearEpilogue::Residual, LinearEpilogue::UpWithGate})
+    for (const uint32_t rows : {8U, 2048U}) others.push_back({{5120, 2048}, rows, LinearPhase::Prefill, epilogue});
+  const Linear linear = gpu(10, 20);
+  for (const Projection &p : {Projection(5120, 2048, AffineWeights{}), blockProjection(5120, 2048, 1)})
+    for (const LinearWorkload &w : others) {
+      (void)linear.plan(w, p);
+      rejects([&] { (void)linear.plan(w, fp32(p)); });
+    }
+  return kernels;
+}
+
 // A GGUF decode projection whose split count is pinned on one core count.
 struct SplitAnchor final {
   const char *projection;
@@ -1114,6 +1156,20 @@ void ggufProjectionMatrix(metal::MetalBackend &backend) {
     rejects([&] { (void)linear.add(graph, buffers, projection, plan); });
     require(graph.empty(), "a block projection that is not the plan's tiles encoded a dispatch");
   }
+  // A projection with an fp32 destination writes fp32 rows through the
+  // kernel's fp32 instance; the fused kernels have none.
+  Projection head = matching, fused(5120, 17408, BlockWeights{{segment(2560, 0), segment(2560, 2560)}});
+  head.destination = fused.destination = FloatOutput::Float32;
+  const LinearPlan fp32 = linear.plan({{5120, 17408}, 8}, head);
+  LinearBuffers fp32Buffers = buffers;
+  fp32Buffers.output = allocate(backend, rows * 5120 * sizeof(float));
+  metal::CommandGraph graph;
+  rejects([&] { (void)linear.add(graph, buffers, head, fp32); });
+  rejects([&] { (void)linear.add(graph, fp32Buffers, fused, linear.plan({{5120, 17408}, 8}, fused)); });
+  require(graph.empty(), "an invalid fp32 block projection encoded a dispatch");
+  (void)linear.add(graph, fp32Buffers, head, fp32);
+  require(graph.dispatches().size() == 1 && graph.dispatches()[0].pipelineName == "gguf_decode_q4k_m8_a_f32",
+          "the fp32 block projection did not encode its fp32 kernel");
 }
 
 std::array<uint64_t, 3> projectionFingerprint(const Projection &projection) {
@@ -1419,6 +1475,29 @@ void numericalCase(metal::MetalBackend &backend, Linear &linear,
     }
     const auto *output = static_cast<const uint16_t *>(b.output.contents());
     const uint64_t elements = uint64_t{storageRows} * p.outputSize;
+    if (workload.phase == LinearPhase::Decode && workload.epilogue == LinearEpilogue::None) {
+      // The fp32 instance (the logits) holds the values the bf16 one
+      // rounds, bit for bit, and writes nothing past its rows.
+      const LinearPlan fp32 = Linear::plan(workload, plan.configuration(), FloatOutput::Float32);
+      const uint64_t fp32Bytes = elements * sizeof(float);
+      auto fp32Backing = allocate(backend, fp32Bytes + guardBytes);
+      std::memset(static_cast<uint8_t *>(fp32Backing.contents()) + fp32Bytes, 0x5a, guardBytes);
+      LinearBuffers fp32Buffers = b;
+      fp32Buffers.output = backend.view(fp32Backing, 0, fp32Bytes);
+      metal::CommandGraph fp32Graph;
+      linear.add(fp32Graph, fp32Buffers, p, fp32);
+      require(fp32Graph.dispatches().back().pipelineName == kernelInstance(plan.pipeline(), FloatOutput::Float32),
+              "an fp32 plan did not dispatch its kernel's fp32 instance");
+      (void)backend.submitCommand(fp32Graph.dispatches());
+      checkGuard(fp32Backing, fp32Bytes, "fp32 output");
+      const auto *values = static_cast<const float *>(fp32Buffers.output.contents());
+      for (uint64_t i = 0; i < elements; ++i)
+        if (tuning::floatToBf16(values[i]) != output[i]) {
+          std::cerr << "fp32 element=" << i << " value=" << values[i] << " bf16=" << tuning::bf16ToFloat(output[i])
+                    << " pipeline=" << fp32.pipeline() << '\n';
+          throw std::runtime_error("an fp32 output does not round to its bf16 plan's output");
+        }
+    }
     if (plan.partialSums() > 1 || plan.usesSimdgroup()) {
       splitOutputs.push_back({{output, output + elements}, immutableResidual, plan.pipeline(), plan.usesSimdgroup()});
     } else {
@@ -1478,17 +1557,34 @@ void numericalCase(metal::MetalBackend &backend, Linear &linear,
   }
 }
 
+// Every plain decode kernel of floatOutputPlans has the fp32 instance its
+// fp32 plans run.
+void floatInstances(const char *metallib, const std::set<std::string_view> &kernels) {
+  id<MTLLibrary> library = [MTLCreateSystemDefaultDevice() newLibraryWithURL:
+      [NSURL fileURLWithPath:[NSString stringWithUTF8String:metallib]] error:nil];
+  require(library != nil, "could not load the Linear library");
+  for (const std::string_view kernel : kernels)
+    require([library newFunctionWithName:[NSString stringWithUTF8String:
+                kernelInstance(kernel, FloatOutput::Float32).c_str()]] != nil,
+            "a plain decode kernel has no fp32 instance");
+}
+
 void pipelineCapabilities(const char *metallib, const DeviceCapabilities &capabilities) {
   Linear linear(capabilities);
   std::map<std::string, uint32_t> names{{"prefill_linear_q4_sums32", 256}};
   const auto collect = [&](LinearWorkload workload) {
-    for (const auto &plan : linear.candidates(workload)) {
-      for (auto name : {plan.pipeline(), plan.secondPipeline()}) {
-        if (name.empty()) continue;
-        const auto [found, inserted] = names.emplace(name, plan.threadsPerThreadgroup());
-        require(inserted || found->second == plan.threadsPerThreadgroup(),
-                "one Linear pipeline was assigned incompatible execution scopes");
-      }
+    const bool plain = workload.phase == LinearPhase::Decode && workload.epilogue == LinearEpilogue::None;
+    for (const auto &candidate : linear.candidates(workload)) {
+      std::vector<LinearPlan> plans{candidate};
+      if (plain) plans.push_back(Linear::plan(workload, candidate.configuration(), FloatOutput::Float32));
+      for (const auto &plan : plans)
+        for (auto name : {plan.pipeline(), plan.secondPipeline()}) {
+          if (name.empty()) continue;
+          const auto [found, inserted] = names.emplace(kernelInstance(name, plan.destination()),
+                                                       plan.threadsPerThreadgroup());
+          require(inserted || found->second == plan.threadsPerThreadgroup(),
+                  "one Linear pipeline was assigned incompatible execution scopes");
+        }
     }
   };
   for (uint32_t lanes = 1; lanes <= 4; ++lanes)
@@ -1532,6 +1628,7 @@ int main(int argc, char **argv) {
     affinePolicyLaws();
     ggufPlans();
     ggufCoreLaws();
+    const std::set<std::string_view> plainKernels = floatOutputPlans();
     narrowM24BoundaryPlans();
     scalingContracts();
     // Apple9 at the assumed core count reaches the expanded split set;
@@ -1546,6 +1643,7 @@ int main(int argc, char **argv) {
       return 0;
     }
     metal::MetalBackend backend(argv[1]);
+    floatInstances(argv[1], plainKernels);
     ggufProjectionMatrix(backend);
     Linear linear(backend.capabilities());
     // Instrumented shader builds can report additional validation storage;

@@ -315,8 +315,9 @@ void checkDenseTarget(MetalBackend &backend, const std::filesystem::path &direct
   check(weights.layers.size() == layout.layers, "GGUF target: every layer");
   check(weights.finalNorm.float32, "GGUF target: F32 final norm");
   check(blockProjection(weights.logitsProjection, layout.vocabularySize, hidden, {layout.vocabularySize}) &&
-            std::string_view(weights.logitsProjection.blocks().segments.front().name()) == "q6k",
-        "GGUF target: logits a Q6_K block projection of vocabulary x hidden");
+            std::string_view(weights.logitsProjection.blocks().segments.front().name()) == "q6k" &&
+            weights.logitsProjection.destination == ops::FloatOutput::Float32,
+        "GGUF target: logits a Q6_K block projection of vocabulary x hidden into fp32");
   check(weights.tokenEmbedding.layout() == ops::WeightLayout::Block32 &&
             weights.tokenEmbedding.blocks().formatId == GGUF_FMT_Q80 &&
             weights.tokenEmbedding.outputSize == layout.vocabularySize && weights.tokenEmbedding.inputSize == hidden,
