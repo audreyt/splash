@@ -434,7 +434,8 @@ def parse_args(argv=None):
     server.add_argument(
         "--host",
         default="127.0.0.1",
-        help="HTTP bind address (default: 127.0.0.1; 0.0.0.0 for all IPv4 interfaces)",
+        help="HTTP bind address (default: 127.0.0.1; 0.0.0.0 for all IPv4 interfaces); "
+        "clients use an IP address, localhost or a name given with --allowed-host",
     )
     server.add_argument(
         "--port",
@@ -497,8 +498,8 @@ def parse_args(argv=None):
         action="append",
         default=[],
         metavar="HOST",
-        help="additional HTTP Host name to accept; does not change the bind address "
-        "(repeatable)",
+        help="additional HTTP Host name to accept, e.g. mymac.local; does not change "
+        "the bind address (repeatable)",
     )
     server.add_argument(
         "--max-request-size",

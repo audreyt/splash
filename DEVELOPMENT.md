@@ -73,8 +73,12 @@ splash serve --model mlx-community/Qwen3.8-27B-4bit --host 0.0.0.0 --api-key YOU
 ```
 
 Connect to the server's LAN IP. `--host` selects the IPv4 bind address;
-`--allowed-host NAME` accepts an additional HTTP Host name, such as a custom DNS
-name or proxy hostname. It does not change the listener or allowlist client IPs.
+`--allowed-host NAME` accepts an additional HTTP Host name, such as the Mac's
+`.local` name, a custom DNS name or a proxy hostname. It does not change the
+listener or allowlist client IPs. A request that names the server any other way
+gets 403 with the `--allowed-host` flag that would accept it; the check keeps out
+web pages that rebind a DNS name to this address. The chat page works over plain
+HTTP from another machine too.
 
 Use `--port 8001` or set `SPLASH_PORT=8001` to select another port. Set the same
 `SPLASH_PORT` in the local agent shell. Separate ports allow separate servers;
