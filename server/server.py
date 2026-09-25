@@ -496,10 +496,12 @@ class FrontendHandler(BaseHTTPRequestHandler):
             self._safe_error(APIError(404, "not found", "not_found"))
             return
         if not prompt_only and not self.app.backend.can_submit():
+            failure = self.app.backend.engine_error
             self._safe_error(
                 APIError(
                     529 if systemone else 503,
-                    "engine is recovering; retry shortly",
+                    "engine is recovering; retry shortly"
+                    + (f" (last failure: {failure})" if failure else ""),
                     "engine_recovering",
                 ),
                 anthropic,

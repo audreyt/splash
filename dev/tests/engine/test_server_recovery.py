@@ -321,6 +321,63 @@ class ServerRecoveryTests(unittest.TestCase):
         self.assertEqual(runtime.restart_count, 1)
         self.assertTrue(backend.can_submit())
 
+    def test_engine_failure_and_failed_restart_are_reported(self):
+        factory = FakeFactory()
+
+        def launch():
+            if factory.processes:
+                raise FileNotFoundError("splash")
+            return factory()
+
+        runtime = engine_runtime.MultiplexedRuntime(process_factory=launch)
+        backend = backend_api.NativeBackend(runtime, NativeTokenizer())
+        self.addCleanup(backend.close)
+        with mock.patch.object(backend_api, "print_status") as console:
+            factory.processes[0].kill()
+            self.wait_until(lambda: console.call_count >= 2)
+            transport = backend.status()["transport"]
+        failed, restart = (call.args[0] for call in console.call_args_list[:2])
+        self.assertEqual(failed, "Engine failed · native protocol reached EOF")
+        self.assertRegex(
+            restart, "^Engine restart failed · native engine executable is missing"
+        )
+        self.assertTrue(transport["recovering"])
+        self.assertIn("executable is missing", transport["error"])
+
+    def test_recovery_refusals_carry_the_last_engine_failure(self):
+        runtime = RecoveringRuntime([engine_runtime.EngineUnhealthy("GPU is gone")])
+        runtime.startup_release.set()
+        harness = self.harness(runtime)
+        clock = [100.0]
+        with (
+            mock.patch.object(
+                backend_api, "time", SimpleNamespace(monotonic=lambda: clock[0])
+            ),
+            mock.patch.object(backend_api, "print_status") as console,
+        ):
+            self.assertFalse(harness.backend.can_submit())
+            self.wait_until(lambda: not harness.backend.status_refresh_inflight)
+            console.assert_called_once_with(
+                "Engine restart failed · GPU is gone", error=True
+            )
+            status, _, payload = harness.request(
+                "POST", "/v1/chat/completions", self.body()
+            )
+            self.assertEqual(status, 503)
+            self.assertEqual(
+                json.loads(payload)["error"]["message"],
+                "engine is recovering; retry shortly (last failure: GPU is gone)",
+            )
+            transport = json.loads(harness.request("GET", "/status")[2])["transport"]
+            self.assertEqual(transport["error"], "GPU is gone")
+            clock[0] = harness.backend.status_refresh_after
+            self.assertFalse(harness.backend.can_submit())
+            self.wait_until(lambda: not harness.backend.status_refresh_inflight)
+            self.assertTrue(harness.backend.can_submit())
+            console.assert_called_with("Engine restarted")
+            transport = json.loads(harness.request("GET", "/status")[2])["transport"]
+            self.assertNotIn("error", transport)
+
     def test_startup_protocol_failure_ends_with_one_error_line(self):
         missing = READY_FEATURES & ~wire.ReadyFeature.MULTIPLEXING
         runtime_type = engine_runtime.MultiplexedRuntime
