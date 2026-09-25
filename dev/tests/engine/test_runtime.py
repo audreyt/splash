@@ -1634,6 +1634,47 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.pending_count, 0)
         self.assertEqual(runtime.restart_count, 1)
 
+    def test_request_deadline_does_not_abandon_a_started_frame(self):
+        process = FakeProcess(1000)
+        process.stdin.close()
+        read_fd, write_fd = os.pipe()
+        process.stdin = os.fdopen(write_fd, "wb", buffering=0)
+        self.addCleanup(os.close, read_fd)
+        runtime = engine_runtime.MultiplexedRuntime(process_factory=lambda: process)
+        self.addCleanup(runtime.close)
+        active = runtime.submit(request(1))
+        os.read(read_fd, 65536)  # Drain just the first complete request.
+        large = engine_runtime.GenerationRequest(
+            prompt_tokens=tuple(range(131072)),
+            logical_max_output_tokens=32,
+            deadline=engine_runtime.Deadline.after(0.1),
+        )
+        received = bytearray()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            writer = executor.submit(runtime.submit, large)
+            self.assertTrue(select.select([read_fd], [], [], 0.5)[0])
+            # The frame has started; let its request deadline pass mid-frame.
+            time.sleep(0.3)
+            self.assertFalse(writer.done())
+            while not writer.done():
+                if select.select([read_fd], [], [], 0.05)[0]:
+                    received += os.read(read_fd, 1 << 20)
+            call = writer.result(0)
+        while select.select([read_fd], [], [], 0)[0]:
+            received += os.read(read_fd, 1 << 20)
+        parser, offset, frames = wire.FrameParser(), 0, []
+        while offset < len(received):
+            step = parser.consume(memoryview(received)[offset:])
+            offset += step.consumed_bytes
+            if step.frame:
+                frames.append(wire.decode_frame(step.frame))
+        self.assertEqual([frame.request_id for frame in frames], [call.request_id])
+        self.assertEqual(frames[0].prompt_tokens, large.prompt_tokens)
+        # The engine, not the transport, now fails the expired request alone.
+        self.assertTrue(runtime.ready)
+        self.assertFalse(active.done)
+        self.assertEqual(runtime.pending_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -900,9 +900,13 @@ class MultiplexedRuntime:
         call: RuntimeCall | None = None,
         deadline: float | None = None,
     ) -> None:
-        io_deadline = time.monotonic() + self._io_timeout
-        deadline = min(deadline, io_deadline) if deadline is not None else io_deadline
-        if not self._write_lock.acquire(timeout=_remaining(deadline)):
+        # The caller's deadline bounds only the start of a frame. A started
+        # frame must be finished: then only the I/O timeout, counted from the
+        # last write that made progress, bounds it.
+        limit = time.monotonic() + self._io_timeout
+        if deadline is not None:
+            limit = min(deadline, limit)
+        if not self._write_lock.acquire(timeout=_remaining(limit)):
             raise TimeoutError("native write lock timed out")
         failure: BaseException | None = None
         finish_failure = None
@@ -918,14 +922,14 @@ class MultiplexedRuntime:
                         return
                     assert self._process is not None
                     stream = self._process.stdin
-                _remaining(deadline)
+                _remaining(limit)
                 # Record under the same lock that defines native wire order.
                 # Concurrent callers can arrive in any Python scheduling
                 # order, but a replay must reproduce the order actually
                 # written to the engine.
                 view = memoryview(encoded)
                 while offset < len(view):
-                    _remaining(deadline)
+                    _remaining(limit)
                     try:
                         written = stream.write(view[offset:])
                     except BlockingIOError:
@@ -935,11 +939,12 @@ class MultiplexedRuntime:
                         # EAGAIN, never a successful write of the whole frame.
                         with selectors.DefaultSelector() as selector:
                             selector.register(stream, selectors.EVENT_WRITE)
-                            selector.select(_remaining(deadline))
+                            selector.select(_remaining(limit))
                         continue
                     if written <= 0:
                         raise BrokenPipeError("native stdin accepted zero bytes")
                     offset += written
+                    limit = time.monotonic() + self._io_timeout
                 self._crash_trace.record_bytes(generation, "client_to_engine", encoded)
             except TimeoutError:
                 if offset == 0:
