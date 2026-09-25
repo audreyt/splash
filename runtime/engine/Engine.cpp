@@ -252,6 +252,12 @@ std::optional<double> Engine::nextWakeupMilliseconds() const {
   if (pending_ || model_.needsHealthCheck())
     result = nextHealthCheckMilliseconds_;
   const bool draining = drainingForRecovery();
+  // Admission retries run only between commands, and after a suspension only
+  // for suspended requests. Other retry times would wake the loop with
+  // nothing to do; the command completion or resumption wakes it instead.
+  const bool recovering = std::any_of(
+      requests_.begin(), requests_.end(),
+      [](const auto &entry) { return entry.second.suspended; });
   for (const auto &[_, active] : requests_) {
     if (active.finalized || active.failure)
       continue;
@@ -260,7 +266,8 @@ std::optional<double> Engine::nextWakeupMilliseconds() const {
     if (!draining && active.resourceWait.deadlineMilliseconds > 0.0 &&
         (!result || active.resourceWait.deadlineMilliseconds < *result))
       result = active.resourceWait.deadlineMilliseconds;
-    if (draining || active.resourceWait.retryMilliseconds <= 0.0)
+    if (draining || pending_ || (recovering && !active.suspended) ||
+        active.resourceWait.retryMilliseconds <= 0.0)
       continue;
     const double wakeup = active.resourceWait.epoch == resourceEpoch_
                               ? active.resourceWait.retryMilliseconds

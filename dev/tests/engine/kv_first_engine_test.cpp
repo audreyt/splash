@@ -1958,6 +1958,62 @@ void testPhysicalPressureRetryIsBackedOffWithoutProgress() {
           "backed-off resource requests did not recover cleanly");
 }
 
+// The native loop blocks until the next wake-up. A waiting request's retry
+// time wakes it only when tick() can retry that request: admission runs
+// between commands, and after a suspension only for suspended requests.
+// Otherwise the retry time passes and the loop polls without blocking.
+void testAdmissionRetryWakesOnlyWhenTickCanRetry() {
+  {
+    Backing backing(8);
+    KvPool pool(backing);
+    engine::Cache resources(pool, CacheNamespace{});
+    Executor executor(1);
+    executor.holdDecodeUntil = std::make_shared<bool>(false);
+    Events events;
+    engine::Engine engine({}, resources, executor, events);
+    engine.submit(request(1, {1}));
+    require(engine.tick(1) && engine.tick(2), "resident request did not prefill");
+    engine.submit(request(2, {2}));
+    require(engine.tick(3) && engine.commandInFlight() &&
+                engine.resourceWaitSnapshot(3).concurrency == 1,
+            "second request did not wait for the resident lane's command");
+    require(!engine.tick(150) &&
+                engine.nextWakeupMilliseconds() == 1150.0,
+            "a lane wait asked for a wake-up while a command was in flight");
+    *executor.holdDecodeUntil = true;
+    for (double now = 151; now < 170 && !engine.idle(); ++now)
+      static_cast<void>(engine.tick(now));
+    require(engine.idle() && events.completedCount == 2,
+            "lane wait did not complete after the command");
+  }
+  {
+    Backing backing(8);
+    KvPool pool(backing);
+    engine::Cache resources(pool, CacheNamespace{});
+    Executor executor(1);
+    Events events;
+    bool paused = true;
+    EngineConfig config;
+    config.growthPaused = [&] { return paused; };
+    engine::Engine engine(config, resources, executor, events);
+    backing.growthBlocked = true;
+    engine.submit(request(1, {1}));
+    engine.submit(request(2, {2}));
+    require(engine.tick(1) && executor.suspensions == 1 &&
+                engine.resourceWaitSnapshot(1).concurrency == 1,
+            "fixture did not suspend one request behind a lane wait");
+    require(!engine.tick(101) && executor.resumeAttempts == 1 &&
+                engine.nextWakeupMilliseconds() == 201.0,
+            "a lane wait asked for a wake-up only the suspended request gets");
+    paused = false;
+    backing.growthBlocked = false;
+    for (double now = 201; now < 220 && !engine.idle(); ++now)
+      static_cast<void>(engine.tick(now));
+    require(engine.idle() && events.completedCount == 2,
+            "lane wait did not complete after the suspended request");
+  }
+}
+
 void testRecoveryDrainDoesNotConsumeResourceWaitBudget() {
   for (bool expireRequest : {false, true}) {
     Backing backing(2);
@@ -3375,6 +3431,7 @@ int main() {
     testPhysicalKvPressureSuspendsInsteadOfKillingActiveWork();
     testRecoveryDrainDoesNotConsumeResourceWaitBudget();
     testPhysicalPressureRetryIsBackedOffWithoutProgress();
+    testAdmissionRetryWakesOnlyWhenTickCanRetry();
     testDecodePreemptionReplaysCommittedHistoryWithoutRepeatingOutput();
     testLongDecodePreemptionPlansTheCurrentReplayBoundary();
     testPreemptedDecodeRestoresItsResidentCompositeState();
