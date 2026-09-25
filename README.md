@@ -81,7 +81,10 @@ or a local draft directory. The tokenizer, configuration and chat template come
 from the target repository for MLX and from the selected GGUF file itself for
 GGUF, never from another repository: unsupported or incomplete tokenizer
 metadata is an error. GGUF variants whose tensor types Splash cannot load are
-rejected before download. Legacy Splash packages such as
+rejected before download. Of Unsloth's files, UD-Q4_K_M and every larger one
+load for Qwen3.8-27B, and UD-IQ4_XS and every larger one for Qwen3.6-35B-A3B,
+except Q4_1, MXFP4_MOE, UD-Q8_K_XL and BF16
+([GGUF targets](DEVELOPMENT.md#gguf-targets)). Legacy Splash packages such as
 `incoai/Qwen3.8-27B-Splash` remain loadable.
 
 Vision comes from the same source: embedded vision tensors for MLX, or the
@@ -127,6 +130,10 @@ that a long uncached prompt will reach its first token quickly.
 
 `splash serve` accepts these optional flags:
 
+- `--revision`: upstream branch, tag or commit. Default: the default branch.
+- `--draft-model`: another DFlash2 draft, a repository or local directory.
+  Default: the draft trained for the model.
+- `--language-only`: skip vision; image and PDF input is then rejected.
 - `--host`: HTTP bind address. Default: `127.0.0.1`.
 - `--port`: HTTP port. Defaults to `SPLASH_PORT` or `8000`.
 - `--max-memory`: ceiling on Metal allocations, e.g. `28G`. Default: auto.
@@ -171,7 +178,7 @@ next-fastest engine we measured. The MLX 4-bit models prepare to the packages'
 target weights, byte for byte but for the 27B's 48 per-layer GDN decay vectors,
 each within a float ULP, and decode within 0.5% of them on this M5 Pro
 ([upstream loading](dev/benchmarks/upstream-loading.md)). GGUF targets run
-other kernels and are not part of this comparison.
+other kernels; [GGUF against llama.cpp](#gguf-against-llamacpp) compares them.
 
 | Metric | Qwen3.6-35B-A3B | Qwen3.8-27B |
 | --- | ---: | ---: |
@@ -186,6 +193,43 @@ grew with load: 3.8× at four concurrent 32K requests on the 35B. The
 comparison against oMLX, Lily, uzu, and Ollama.
 
 For repeatable measurements on your Mac, see [local benchmarks](DEVELOPMENT.md#local-benchmarks).
+
+### GGUF against llama.cpp
+
+We compared Splash with llama.cpp (e6ab7c1, Metal) on the same Unsloth
+UD-Q4_K_M files. For accuracy, both read the same text, 16,384 positions of
+prose, code and chat, and at each position we compared the tokens they rank
+first:
+
+| Same token ranked first | Qwen3.8-27B | Qwen3.6-35B-A3B |
+| --- | ---: | ---: |
+| Splash and llama.cpp | 99.30–99.45% | 97.83–98.14% |
+| llama.cpp on the CPU and on Metal | 97.8% | 96.5–96.9% |
+| llama.cpp one token at a time and batched | 99.65–99.75% | 97.95% |
+
+The positions where they differ are near-ties: there, llama.cpp's two best
+tokens are a median 0.03–0.10 nats apart, against 2.6–2.7 nats over all
+positions. Splash's perplexity is 0.1–0.4% (27B) and 0.1–0.9% (35B) above
+llama.cpp's; llama.cpp's CPU backend is 1.7–1.8% above its Metal on the 27B.
+Splash's figures cover an M5 Pro and an M3 Max with `--kv-format bf16`; the
+default INT8 cache gives 99.23–99.25% and 97.92–97.94% on the M5 Pro.
+
+Speed uses the prompts and greedy settings of the table above. llama-server
+runs with its default settings, which do not speculate, and for the 27B also
+with the MTP draft Unsloth ships:
+
+| Decode tok/s | M5 Pro, 20-core GPU | M3 Max, 40-core GPU |
+| --- | ---: | ---: |
+| Qwen3.6-35B-A3B · Splash | 175 | 209 |
+| Qwen3.6-35B-A3B · llama.cpp | 69 | 66 |
+| Qwen3.8-27B · Splash | 74 | 92 |
+| Qwen3.8-27B · llama.cpp | 16 | 17 |
+| Qwen3.8-27B · llama.cpp with MTP | 27 | 20 |
+
+Splash decodes 2.5–3.2× as fast as llama.cpp on the 35B and 4.5–5.3× on
+the 27B (2.7–4.6× against its MTP). Prefilling a 2,048-token chunk, it runs
+at 559 tok/s against 374 on the 27B and 3,662 against 1,968 on the 35B on
+the M5 Pro, and at 245 against 193 and 1,814 against 1,575 on the M3 Max.
 
 ## Design
 
