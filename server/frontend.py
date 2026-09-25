@@ -997,7 +997,12 @@ class Frontend:
             if previous_id is not None:
                 previous = self.response_store.get(previous_id)
                 if previous is None:
-                    raise APIError(404, "response not found", "not_found_error")
+                    # Clients key on this code to resend the full history.
+                    raise APIError(
+                        404,
+                        "previous response not found",
+                        "previous_response_not_found",
+                    )
                 # The immutable record remains valid if the store evicts it.
                 # Reserve its input bytes before materializing the history.
                 if reserve_input is not None:
