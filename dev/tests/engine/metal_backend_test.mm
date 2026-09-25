@@ -1219,6 +1219,25 @@ void run(const std::string &metallibPath) {
                 "sparse mapping was not visible to the compute queue");
     }
 
+    // Tiles are counted from the start of the buffer, so a view with an
+    // offset can be neither mapped nor unmapped: its tile 0 is not the
+    // buffer's.
+    MetalBuffer wide = backend.allocatePlacementSparseBuffer(
+        2 * kSparseTileBytes, kSparseTileBytes, "sparse-view-test");
+    SparseMapping viewMapping{
+        backend.view(wide, kSparseTileBytes, kSparseTileBytes), 0,
+        kSparseTileBytes, 0};
+    requireBackendError(
+        [&] { backend.mapSparse(heap, {&viewMapping, 1}); },
+        "a sparse view with an offset was mapped");
+    requireBackendError(
+        [&] { backend.unmapSparse({&viewMapping, 1}, std::move(heap)); },
+        "a sparse view with an offset was unmapped");
+    require(heap && backend.healthy(),
+            "a rejected view mapping took the heap or poisoned the backend");
+    viewMapping.buffer = {};
+    wide = {};
+
     // Unmapping is asynchronous: the backend owns the heap until the sparse
     // queue reports completion, and the caller's handle is left empty.
     requireBackendError(

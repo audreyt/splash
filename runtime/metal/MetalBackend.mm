@@ -992,11 +992,13 @@ void MetalBackend::mapSparse(
     static_cast<void>(impl_->reapSparseUnmapsLocked());
     const uint64_t tileBytes = kPlacementSparsePageBytes;
     for (const SparseMapping &mapping : mappings) {
+        // Tiles are counted from the start of the buffer, not of a view.
         if (!mapping.buffer.impl_ ||
             !mapping.buffer.impl_->allocation ||
             mapping.buffer.impl_->allocation->accounting.get() !=
                 impl_->accounting.get() ||
-            !mapping.buffer.impl_->allocation->placementSparse) {
+            !mapping.buffer.impl_->allocation->placementSparse ||
+            mapping.buffer.impl_->offsetBytes) {
             throw MetalBackendError("invalid placement-sparse buffer");
         }
         if (!mapping.sizeBytes ||
@@ -1080,6 +1082,7 @@ void MetalBackend::unmapSparse(
             mapping.buffer.impl_->allocation->accounting.get() !=
                 impl_->accounting.get() ||
             !mapping.buffer.impl_->allocation->placementSparse ||
+            mapping.buffer.impl_->offsetBytes ||
             !mapping.sizeBytes ||
             mapping.bufferOffsetBytes % tileBytes ||
             mapping.sizeBytes % tileBytes ||

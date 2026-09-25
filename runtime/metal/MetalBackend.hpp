@@ -115,6 +115,9 @@ private:
   friend class MetalBackend;
 };
 
+// Tiles [bufferOffsetBytes, bufferOffsetBytes + sizeBytes) of a
+// placement-sparse buffer, never a view with an offset, backed from
+// heapOffsetBytes of a placement heap.
 struct SparseMapping {
   MetalBuffer buffer;
   uint64_t bufferOffsetBytes = 0;
