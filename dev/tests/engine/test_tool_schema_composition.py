@@ -485,6 +485,33 @@ class ToolSchemaCompositionTests(unittest.TestCase):
             LLMatcher(self.guidance, grammar).validate_tokens(tokens), len(tokens)
         )
 
+    def test_extra_names_may_start_like_unused_declared_names(self):
+        schema = {
+            "properties": {"url": {"type": "string"}, "ab": {"type": "integer"}},
+            "additionalProperties": {"type": "integer"},
+        }
+        for extra in ("user-agent", "urls", "u", "a", "abc"):
+            with self.subTest(extra=extra):
+                self.check_arguments(schema, {extra: 1}, {extra: "1"})
+
+        def rejected(policy, xml):
+            matcher = LLMatcher(self.guidance, tool_schema.tool_grammar(policy, False))
+            tokens = self.tokenizer.encode(xml).ids
+            return matcher.validate_tokens(tokens) < len(tokens)
+
+        # Declared names still appear once, and forbidden ones not at all.
+        policy, xml = self.check_arguments(
+            schema, {"url": "x", "ab": 1, "user-agent": 2}, {"url": 1}
+        )
+        repeated = "<parameter=url>\nx\n</parameter>\n</function>"
+        self.assertTrue(rejected(policy, xml.replace("</function>", repeated)))
+        policy, xml = self.check_arguments(
+            {"properties": {"secret": False}, "additionalProperties": {}},
+            {"secrets": 1},
+            {"secret": 1},
+        )
+        self.assertTrue(rejected(policy, xml.replace("secrets", "secret")))
+
 
 if __name__ == "__main__":
     unittest.main()

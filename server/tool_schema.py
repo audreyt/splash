@@ -555,34 +555,6 @@ def tool_argument_schema(root, budget=None):
     return shape
 
 
-def _extra_parameter_names(names, rules):
-    # A trie expresses the complement of declared names without lookaround,
-    # which the grammar engine's regular-expression dialect does not support.
-    trie = {}
-    for name in names:
-        node = trie
-        for char in name:
-            node = node.setdefault(char, {})
-        node[None] = True
-    counter = 0
-
-    def emit(node, depth):
-        nonlocal counter
-        rule = f"extra_name_{counter}"
-        counter += 1
-        children = [char for char in node if char is not None]
-        excluded = "".join(re.escape(char).replace("/", r"\/") for char in children)
-        options = [f"/[^<>\\n\\r{excluded}][^<>\\n\\r]*/"]
-        for char in children:
-            options.append(f"{json.dumps(char)} {emit(node[char], depth + 1)}")
-        if depth and None not in node:
-            options.append("")
-        rules.append(f"{rule}: " + " | ".join(options))
-        return rule
-
-    return emit(trie, 0)
-
-
 def _tool_arguments_grammar(schema):
     return _argument_grammar(tool_argument_schema(schema))
 
@@ -622,6 +594,9 @@ def _argument_grammar(schema):
     sequence = []
     required_sequence = []
     optional_sequence = []
+    # A name is a lexeme of its own: one spanning "<parameter=url>" would win
+    # over an extra name that starts like it, and lexing cannot back off.
+    name_open, name_close = json.dumps(PARAMETER_OPEN), json.dumps(">\n")
     for index, (name, value_schema) in enumerate(properties.items()):
         if value_schema is False:
             if name in required:
@@ -640,12 +615,16 @@ def _argument_grammar(schema):
         item = rule + ("" if name in required else "?")
         sequence.append(item)
         (required_sequence if name in required else optional_sequence).append(item)
-        prefix = json.dumps(f"{PARAMETER_OPEN}{name}>\n")
+        prefix = f"{name_open} {json.dumps(name)} {name_close}"
         rules.extend(_parameter_rules(rule, prefix, value_schema))
     additional = schema["additionalProperties"]
     if additional is not False:
-        name_rule = _extra_parameter_names(properties, rules)
-        prefix = f"{json.dumps(PARAMETER_OPEN)} {name_rule} {json.dumps('>' + chr(10))}"
+        # Extra names are the complement of the declared names.
+        declared = " | ".join(json.dumps(name) for name in properties)
+        rules.append(
+            "EXTRA_NAME: /[^<>\\n\\r]+/" + (f" & ~({declared})" if declared else "")
+        )
+        prefix = f"{name_open} EXTRA_NAME {name_close}"
         rules.extend(_parameter_rules("extra", prefix, additional))
     # A skipped optional field cannot be revisited in an ordered grammar.
     # Also accept required-first order so a model that starts with the required
