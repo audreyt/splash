@@ -1,41 +1,21 @@
 #include "model/AffineTarget.hpp"
-#include "model/AffinePreparation.hpp"
+#include "model/AffinePlan.hpp"
 #include "model/Qwen3_8.hpp"
 #include "model/Qwen3_6Moe.hpp"
 #include "model/SafetensorsCheckpoint.hpp"
 #include "model/StateLayout.hpp"
 #include "model/WeightLayout.hpp"
 
-#include <algorithm>
-
 namespace splash::model {
 namespace {
 
+using affine::append;
+using affine::copy;
+using affine::image;
 using affine::Image;
-using affine::Input;
 using affine::ProjectionPart;
 using affine::Section;
 using affine::SectionKind;
-
-// An image of a header block and sections; append places each section.
-Image image(std::string name, std::string_view magic, uint32_t layer, uint32_t type) {
-  return {std::move(name), std::string(magic), layer, type, kWeightFileAlignment, {}, {}};
-}
-
-void append(Image &image, Section section) {
-  section.offset = image.bytes;
-  image.bytes = alignWeightOffset(image.bytes + section.bytes);
-  image.sections.push_back(std::move(section));
-}
-
-// A tensor copied as stored, BF16 or U32.
-void copy(Image &image, const std::string &name, std::vector<uint64_t> shape, const std::string &dtype = "BF16") {
-  Section section;
-  section.bytes = dtype == "U32" ? 4 : kBFloat16Bytes;
-  for (uint64_t dimension : shape) section.bytes = checkedWeightMultiply(section.bytes, dimension, "affine tensor");
-  section.input = {name, {dtype}, std::move(shape)};
-  append(image, std::move(section));
-}
 
 // Projection parts, stacked in row order, padded with zero rows to `rows`.
 void projection(Image &image, std::initializer_list<std::pair<std::string, uint32_t>> parts,
@@ -53,11 +33,11 @@ void projection(Image &image, std::initializer_list<std::pair<std::string, uint3
   for (const auto &[name, count] : parts) {
     image.quantized.emplace_back(name, bits);
     ProjectionPart part{count, {}};
-    for (size_t field = 0; field < part.fields.size(); ++field) {
+    for (size_t field = 0; field < 3; ++field) { // weight, scales, biases
       std::vector<uint64_t> shape{count, field ? columns / kQ4GroupElements : columns * bits / 32};
       if (experts > 1) shape.insert(shape.begin(), experts);
-      part.fields[field] = {name + (field == 0 ? ".weight" : field == 1 ? ".scales" : ".biases"),
-                            {field ? "BF16" : "U32"}, std::move(shape)};
+      part.fields.push_back({name + (field == 0 ? ".weight" : field == 1 ? ".scales" : ".biases"),
+                             {field ? "BF16" : "U32"}, std::move(shape)});
     }
     sourceRows += count;
     section.parts.push_back(std::move(part));
@@ -187,24 +167,6 @@ uint64_t preparedBytes(const Layout &layout) {
   return bytes;
 }
 
-void bind(Input &input, const SafetensorsCheckpoint &source) {
-  const SourceTensor &tensor = source.require(input.name);
-  if (std::find(input.dtypes.begin(), input.dtypes.end(), tensor.dtype) == input.dtypes.end() ||
-      tensor.shape != input.shape)
-    throw WeightStoreError("source tensor type or shape does not match: " + input.name);
-  input.tensor = &tensor;
-}
-
-// Binds every input of image to its checkpoint tensor.
-void bind(Image &image, const SafetensorsCheckpoint &source) {
-  for (const auto &[module, bits] : image.quantized) source.requireQuantization(module, bits);
-  for (Section &section : image.sections) {
-    if (section.kind != SectionKind::Projection) bind(section.input, source);
-    for (ProjectionPart &part : section.parts)
-      for (Input &field : part.fields) bind(field, source);
-  }
-}
-
 } // namespace
 
 struct AffineTargetLoader::Impl {
@@ -223,8 +185,8 @@ struct AffineTargetLoader::Impl {
     images = model::images(layout);
     for (Image &image : images) {
       backend.checkOperation();
-      bind(image, source);
-      weights.push_back(affine::affineImageWeight(image, directory.string()));
+      affine::bind(image, source);
+      weights.push_back(affine::affineImageWeight(image, "target", directory.string()));
     }
   }
   WeightFile open(size_t index) {

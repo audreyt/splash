@@ -38,9 +38,6 @@ else:
 MODELS = paths.MODELS
 # The bound on one JSON metadata file.
 MAX_JSON_BYTES = 4 * 1024 * 1024
-# The magic that begins each DFlash2 draft layer file Splash loads, and the
-# draft configuration's splash.format.
-DRAFT_LAYER_MAGIC = "MDFD0004"
 REPO_ID = re.compile(
     r"[A-Za-z0-9_](?:[A-Za-z0-9._-]*[A-Za-z0-9_])?/"
     r"[A-Za-z0-9_](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9_])?"
@@ -301,18 +298,12 @@ def parse_args(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("prepare")
     commands.add_parser("verify").add_argument("--full", action="store_true")
+    commands.add_parser("link", help="print the selection link")
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
-    # The installers import this module, so it imports them once it exists.
-    if __package__:
-        from . import assembly, legacy, upstream
-    else:
-        import assembly
-        import legacy
-        import upstream
     selection = Selection.of(
         args.models,
         args.model,
@@ -320,6 +311,16 @@ def main(argv=None):
         language_only=args.language_only,
         draft_model=args.draft_model,
     )
+    if args.command == "link":
+        print(selection.link)
+        return 0
+    # The installers import this module, so it imports them once it exists.
+    if __package__:
+        from . import assembly, legacy, upstream
+    else:
+        import assembly
+        import legacy
+        import upstream
     try:
         if args.command == "prepare":
             upstream.prepare(selection)

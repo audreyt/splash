@@ -22,8 +22,9 @@ The paths an assembly links, and what reads each:
   tokenizer/<file>       the MLX tokenizer files, or tokenizer.json,
                          tokenizer_config.json and chat_template.jinja derived
                          from the GGUF (server.py --tokenizer)
-  draft/config.json, draft/model.bin, draft/layer-<N>.bin
-                         the DFlash2 draft (ModelDescriptor.mm, DFlashDraft.cpp)
+  draft/config.json, draft/<name>.safetensors
+                         the DFlash2 checkpoint (ModelDescriptor.mm,
+                         DraftCheckpoint.cpp)
   vision/config.json, vision/<shard>
                          the MLX shards holding vision_tower.*
                          (VisionLoader.cpp, through SafetensorsCheckpoint.mm)
@@ -153,6 +154,8 @@ def verify(assembly: Path, *, full=False):
     record = models.read_json(assembly / "model.json")
     if not _well_formed(record):
         raise models.ModelError("invalid resolved model record")
+    if _packed_draft(record["files"]):
+        raise models.ModelError("its draft is not a DFlash2 checkpoint")
     for name, entry in record["files"].items():
         path = assembly / name
         stat = path.stat()
@@ -212,6 +215,13 @@ def _well_formed(record):
     )
 
 
+def _packed_draft(files):
+    """Whether the assembly links a packed draft, draft/model.bin and
+    draft/layer-N.bin, as assemblies did before drafts were prepared from
+    their DFlash2 checkpoints; the runtime loads only a checkpoint now."""
+    return any(name.startswith("draft/") and name.endswith(".bin") for name in files)
+
+
 def pins(record):
     """The Hub snapshot of each source an assembly links files from, with its
     repository ID: the snapshots its installation pins. Each is found from a
@@ -229,6 +239,17 @@ def pins(record):
         if key in sources:
             snapshots[path] = sources[key]
     return sorted(snapshots.items())
+
+
+def recorded_pins(link: Path):
+    """pins of the assembly a selection link names, as its record states
+    them whether or not the assembly still verifies; none without a record
+    of the shape build writes."""
+    try:
+        record = models.read_json(link / "model.json")
+    except models.ModelError:
+        return []
+    return pins(record) if _well_formed(record) else []
 
 
 def _metadata_inputs(files):

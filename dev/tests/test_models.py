@@ -604,7 +604,11 @@ class ModelArtifactTest(unittest.TestCase):
         args = installer.parse_args(["--model", self.MODEL_ID, "prepare"])
         self.assertEqual((args.command, args.model), ("prepare", self.MODEL_ID))
         makefile = (Path(__file__).resolve().parents[2] / "Makefile").read_text()
-        self.assertIn('$(MODEL_INSTALL) --model "$(MODEL)" prepare', makefile)
+        self.assertIn(
+            "MODEL_INSTALL = $(PYTHON) install/models.py $(MODEL_ARGS)", makefile
+        )
+        self.assertIn('MODEL_ARGS = --model "$(MODEL)"', makefile)
+        self.assertIn("\t$(MODEL_INSTALL) prepare\n", makefile)
 
     def test_prepare_atomically_installs_then_reuses_offline_without_hashing_weights(
         self,
@@ -685,62 +689,6 @@ class ModelArtifactTest(unittest.TestCase):
         self.manifest_download.assert_not_called()
         self.download.assert_not_called()
 
-    def test_draft_export_copies_verified_weights_and_names_their_source(self):
-        from dev.tools import export_draft
-
-        snapshot, manifest = self.package_fixture()
-        for index, name in enumerate(
-            (*(f"layer-{i}.bin" for i in range(5)), "model.bin")
-        ):
-            with (snapshot / "draft" / name).open("r+b") as file:
-                file.write(
-                    struct.pack("<8sII", b"MDFD0004", index, name == "model.bin")
-                )
-        for record in manifest["artifacts"]:
-            # Digests compare case-insensitively, as installation checks them.
-            record["sha256"] = installer.sha256(snapshot / record["path"]).upper()
-        manifest["upstream"] = {
-            "draft": {"repo_id": "z-lab/draft", "revision": "e" * 40}
-        }
-        self.write_manifest(snapshot, manifest)
-        config = self.root / "dflash2.json"
-        config.write_text(
-            json.dumps({"architectures": ["DFlash2DraftModel"], "num_hidden_layers": 5})
-        )
-        destination = self.root / "exported"
-        with contextlib.redirect_stdout(io.StringIO()):
-            export_draft.export(snapshot, config, destination)
-        exported = json.loads((destination / "config.json").read_text())
-        self.assertEqual(
-            exported["splash"],
-            {
-                "format": "MDFD0004",
-                "source": {"repo": "z-lab/draft", "revision": "e" * 40},
-            },
-        )
-        self.assertEqual(
-            (destination / "layer-4.bin").read_bytes(),
-            (snapshot / "draft/layer-4.bin").read_bytes(),
-        )
-        for mutate, message in (
-            (lambda m: m.pop("upstream"), "names no upstream draft"),
-            (
-                lambda m: m["upstream"]["draft"].update(revision="main"),
-                "names no upstream draft",
-            ),
-        ):
-            broken = copy.deepcopy(manifest)
-            mutate(broken)
-            self.write_manifest(snapshot, broken)
-            with self.assertRaisesRegex(installer.ModelError, message):
-                export_draft.export(snapshot, config, self.root / "other")
-        self.write_manifest(snapshot, manifest)
-        with (snapshot / "draft/layer-2.bin").open("r+b") as file:
-            file.write(struct.pack("<8sII", b"MDFD0004", 3, 0))
-        with self.assertRaisesRegex(installer.ModelError, "checksum changed"):
-            export_draft.export(snapshot, config, self.root / "other")
-        self.assertFalse((self.root / "other").exists())
-
     def test_variant_model_ids_parse_and_name_selection_links(self):
         self.assertEqual(
             installer.split_model_id("owner/repo:UD-Q4_K_M"),
@@ -764,6 +712,34 @@ class ModelArtifactTest(unittest.TestCase):
         self.assertEqual(
             installer.selection_link(models, "owner/repo"), models / "owner/repo"
         )
+
+    def test_link_prints_the_selection_link_of_the_source_options(self):
+        # make's MODEL_ROOT is this output; a relative draft folder names the
+        # installation splash serve --draft-model selects from the same folder.
+        models = self.root / "models"
+        draft = self.root / "draft"
+        draft.mkdir()
+        for arguments, options in (
+            (["--model", "owner/repo:UD-Q4_K_M"], {}),
+            (
+                ["--model", "owner/repo", "--revision", "b" * 40, "--language-only"]
+                + ["--draft-model", os.path.relpath(draft)],
+                {
+                    "revision": "b" * 40,
+                    "language_only": True,
+                    "draft_model": str(draft.resolve()),
+                },
+            ),
+        ):
+            with (
+                self.subTest(arguments=arguments),
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                self.assertEqual(
+                    installer.main(["--models", str(models), *arguments, "link"]), 0
+                )
+            link = installer.selection_link(models.resolve(), arguments[1], **options)
+            self.assertEqual(output.getvalue(), f"{link}\n")
 
     def test_a_package_takes_no_variant(self):
         snapshot, _ = self.package_fixture()

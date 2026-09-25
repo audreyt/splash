@@ -9,6 +9,7 @@ import base64
 import http.client
 import io
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -40,12 +41,21 @@ def available_port() -> int:
         return int(listener.getsockname()[1])
 
 
+def request_headers(payload: bool) -> dict:
+    """The JSON content type of a body, and the key the server requires
+    when SPLASH_API_KEY is set: the server's --api-key defaults to it."""
+    headers = {"Content-Type": "application/json"} if payload else {}
+    if key := os.environ.get("SPLASH_API_KEY"):
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
 def request(
     port: int, method: str, path: str, body: dict | None = None, *, timeout: float = 60
 ):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     payload = None if body is None else json.dumps(body).encode()
-    headers = {} if payload is None else {"Content-Type": "application/json"}
+    headers = request_headers(payload is not None)
     try:
         connection.request(method, path, payload, headers)
         response = connection.getresponse()
@@ -63,7 +73,7 @@ def stream_request(port: int, path: str, body: dict) -> tuple[int, str, bytes]:
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
     payload = json.dumps(body).encode()
     try:
-        connection.request("POST", path, payload, {"Content-Type": "application/json"})
+        connection.request("POST", path, payload, request_headers(True))
         response = connection.getresponse()
         return response.status, response.getheader("Content-Type", ""), response.read()
     finally:
@@ -71,7 +81,9 @@ def stream_request(port: int, path: str, body: dict) -> tuple[int, str, bytes]:
 
 
 class RealServer:
-    def __init__(self, arguments):
+    def __init__(self, arguments, environment: dict | None = None):
+        """A server of arguments.package, its process started with these
+        variables added to this process's environment."""
         package = arguments.package.resolve()
         binary = arguments.binary.resolve()
         self.port = available_port()
@@ -102,6 +114,7 @@ class RealServer:
         self.process = subprocess.Popen(
             command,
             cwd=ROOT,
+            env=None if environment is None else {**os.environ, **environment},
             stdout=self.log,
             stderr=subprocess.STDOUT,
             text=True,
@@ -368,10 +381,252 @@ def run_images(port: int, model: str, nonce: str) -> None:
     print("responses image input: PASS", flush=True)
 
 
-def run(port: int, model: str) -> None:
-    nonce = uuid.uuid4().hex
+# What a server without vision answers an image or PDF with
+# (server/api_shapes.py, VISION_UNAVAILABLE).
+VISION_UNAVAILABLE = "this model is serving without vision"
+LATER_SYSTEM_UNSUPPORTED = "does not accept system messages after the first message"
+# Where the chat template probe of /status says later system messages go.
+LATER_SYSTEM_IN_PLACE = ("native", "patched")
+
+
+def input_modalities(port: int, model: str) -> list:
+    """The served model's input modalities, as /v1/models reports them and
+    /status agrees."""
     code, models = request(port, "GET", "/v1/models")
     require(code == 200 and models.get("data"), "model discovery failed")
+    entry = next((item for item in models["data"] if item.get("id") == model), None)
+    require(entry is not None, f"model discovery does not list {model}: {models!r}")
+    modalities = entry.get("input_modalities")
+    require(
+        isinstance(modalities, list) and "text" in modalities,
+        f"model discovery lacks text input modalities: {entry!r}",
+    )
+    status = runtime_status(port)
+    require(
+        status.get("input_modalities") == modalities
+        and bool(status.get("vision")) == ("image" in modalities),
+        "/status and /v1/models disagree on vision: "
+        f"{status.get('vision')!r} {status.get('input_modalities')!r} vs {modalities!r}",
+    )
+    return modalities
+
+
+def later_system_mode(port: int) -> str:
+    """What the chat template probe of /status reports for later system
+    messages of a request without tools: its default template's handling."""
+    template = runtime_status(port).get("chat_template")
+    later = template.get("later_system") if isinstance(template, dict) else None
+    modes = list(later.values()) if isinstance(later, dict) else [later]
+    require(
+        modes
+        and all(mode in (*LATER_SYSTEM_IN_PLACE, "unsupported") for mode in modes),
+        f"/status lacks the chat template probe result: {template!r}",
+    )
+    if isinstance(later, dict):
+        require("default" in later, f"named chat templates lack a default: {later!r}")
+        return later["default"]
+    return later
+
+
+def run_chat_template(port: int, model: str) -> str:
+    """When the probe says later system messages render in place, the
+    rendered prompt keeps a later system block after the assistant turn it
+    follows and before the next user turn."""
+    mode = later_system_mode(port)
+    if mode not in LATER_SYSTEM_IN_PLACE:
+        print(f"chat template: later system messages {mode}", flush=True)
+        return mode
+    answer = "The answer is four."
+    later = "From now on answer in French."
+    question = "What is three plus three?"
+    code, rendered = request(
+        port,
+        "POST",
+        "/apply-template",
+        {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You are a terse assistant."},
+                {"role": "user", "content": "What is two plus two?"},
+                {"role": "assistant", "content": answer},
+                {"role": "system", "content": later},
+                {"role": "user", "content": question},
+            ],
+        },
+    )
+    prompt = rendered.get("prompt") if code == 200 else None
+    require(isinstance(prompt, str), f"apply-template failed: {code} {rendered!r}")
+    require(
+        all(prompt.count(text) == 1 for text in (answer, later, question))
+        and prompt.find(answer) + len(answer)
+        <= prompt.find(later)
+        < prompt.find(question),
+        f"later system message was not rendered in place ({mode}): {prompt!r}",
+    )
+    if "<|im_start|>" in prompt:
+        # ChatML: the message keeps a system block of its own.
+        require(
+            f"<|im_start|>system\n{later}<|im_end|>" in prompt,
+            f"later system message did not keep its system block: {prompt!r}",
+        )
+    print(f"chat template: later system in place ({mode}): PASS", flush=True)
+    return mode
+
+
+def error_message(document: dict) -> str:
+    error = document.get("error") if isinstance(document, dict) else None
+    return (error.get("message") if isinstance(error, dict) else None) or ""
+
+
+def language_only_refusal(code: int, document: dict, modality: str) -> bool:
+    """Whether a response is the refusal of image or PDF input by a server
+    without vision."""
+    message = error_message(document)
+    return (
+        code == 400
+        and message.startswith(f"{modality} input is not supported")
+        and VISION_UNAVAILABLE in message
+    )
+
+
+def run_text_only(port: int, model: str, nonce: str) -> None:
+    """A server without vision refuses images and PDFs, in every API shape,
+    with the language-only message before rendering anything, and serves the
+    next text request."""
+    question = f"What color is this image? Answer with one word. Request {nonce}."
+    pdf = base64.b64encode(
+        (ROOT / "dev/tests/fixtures/documents/plain.pdf").read_bytes()
+    ).decode()
+    image = image_data_url("red")
+    media_type, _, data = image.partition(";base64,")
+    requests = {
+        "image Chat": (
+            "/v1/chat/completions",
+            image_chat_body(model, question, image),
+            "image",
+        ),
+        "PDF Chat": (
+            "/v1/chat/completions",
+            {
+                **chat_body(model, ""),
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "file",
+                                "file": {
+                                    "filename": "plain.pdf",
+                                    "file_data": "data:application/pdf;base64," + pdf,
+                                },
+                            },
+                            {"type": "text", "text": "Briefly describe the page."},
+                        ],
+                    }
+                ],
+            },
+            "PDF",
+        ),
+        "image Messages": (
+            "/v1/messages",
+            {
+                "model": model,
+                "max_tokens": 32,
+                "thinking": {"type": "disabled"},
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type.removeprefix("data:"),
+                                    "data": data,
+                                },
+                            },
+                            {"type": "text", "text": question},
+                        ],
+                    }
+                ],
+            },
+            "image",
+        ),
+        "PDF Messages": (
+            "/v1/messages",
+            {
+                "model": model,
+                "max_tokens": 32,
+                "thinking": {"type": "disabled"},
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "document",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "application/pdf",
+                                    "data": pdf,
+                                },
+                            },
+                            {"type": "text", "text": "Briefly describe the page."},
+                        ],
+                    }
+                ],
+            },
+            "PDF",
+        ),
+        "Responses input_image": (
+            "/v1/responses",
+            {
+                "model": model,
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": question},
+                            {"type": "input_image", "image_url": image},
+                        ],
+                    }
+                ],
+                "max_output_tokens": 32,
+                "store": False,
+            },
+            "image",
+        ),
+    }
+    before = counters(port)
+    for name, (path, body, modality) in requests.items():
+        code, rejected = request(port, "POST", path, body)
+        require(
+            language_only_refusal(code, rejected, modality),
+            f"text-only {name} was not refused as language-only: {code} {rejected!r}",
+        )
+    code, chat = request(
+        port,
+        "POST",
+        "/v1/chat/completions",
+        chat_body(model, f"Reply with one short word. After media {nonce}."),
+    )
+    require(
+        code == 200 and chat.get("usage", {}).get("completion_tokens", 0) > 0,
+        f"text request after refused media failed: {code} {chat!r}",
+    )
+    after = counters(port)
+    require(
+        after["submitted"] == before["submitted"] + 1
+        and after["failed"] == before["failed"]
+        and after["restarts"] == 0,
+        f"refused media reached the runtime: {before!r} -> {after!r}",
+    )
+    print("text-only media refusal: PASS", flush=True)
+
+
+def run(port: int, model: str) -> None:
+    nonce = uuid.uuid4().hex
+    modalities = input_modalities(port, model)
 
     code, chat = request(
         port,
@@ -493,6 +748,7 @@ def run(port: int, model: str) -> None:
     )
     print("responses: PASS", flush=True)
 
+    later_system = run_chat_template(port, model)
     code, anthropic = request(
         port,
         "POST",
@@ -514,20 +770,30 @@ def run(port: int, model: str) -> None:
             "thinking": {"type": "disabled"},
         },
     )
-    require(code == 200 and anthropic.get("type") == "message", "Messages failed")
-    require(isinstance(anthropic.get("content"), list), "Messages content missing")
-    require(
-        "PONG" in "".join(block.get("text", "") for block in anthropic["content"]),
-        "Messages inline system instruction was not followed",
-    )
+    if later_system in LATER_SYSTEM_IN_PLACE:
+        require(code == 200 and anthropic.get("type") == "message", "Messages failed")
+        require(isinstance(anthropic.get("content"), list), "Messages content missing")
+        require(
+            "PONG" in "".join(block.get("text", "") for block in anthropic["content"]),
+            "Messages inline system instruction was not followed",
+        )
+    else:
+        require(
+            code == 400 and LATER_SYSTEM_UNSUPPORTED in error_message(anthropic),
+            f"unsupported later system message was not refused: {anthropic!r}",
+        )
     print("anthropic messages: PASS", flush=True)
 
-    run_images(port, model, nonce)
-    run_protocol_extensions(port, model)
+    vision = "image" in modalities
+    if vision:
+        run_images(port, model, nonce)
+    else:
+        run_text_only(port, model, nonce)
+    run_protocol_extensions(port, model, vision)
     run_judgments(port, model, nonce)
 
 
-def run_protocol_extensions(port: int, model: str) -> None:
+def run_protocol_extensions(port: int, model: str, vision: bool = True) -> None:
     messages = [{"role": "user", "content": "What is 2 + 2? Answer briefly."}]
     for suffix in ("", "?beta=true"):
         code, count = request(
@@ -634,38 +900,8 @@ def run_protocol_extensions(port: int, model: str) -> None:
         count["input_tokens"] == actual, f"count/usage mismatch: {count!r} vs {usage!r}"
     )
 
-    pdf = base64.b64encode(
-        (ROOT / "dev/tests/fixtures/documents/plain.pdf").read_bytes()
-    ).decode()
-    code, document = request(
-        port,
-        "POST",
-        "/v1/messages",
-        {
-            "model": model,
-            "max_tokens": 64,
-            "thinking": {"type": "disabled"},
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "document",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "application/pdf",
-                                "data": pdf,
-                            },
-                        },
-                        {"type": "text", "text": "Briefly describe the page."},
-                    ],
-                }
-            ],
-        },
-    )
-    require(
-        code == 200 and document.get("content"), f"PDF generation failed: {document!r}"
-    )
+    if vision:
+        run_pdf(port, model)
 
     code, combined = request(
         port,
@@ -756,6 +992,41 @@ def run_protocol_extensions(port: int, model: str) -> None:
     print(
         "Anthropic count/beta, hidden-thinking continuation, structured output and nullable Responses: PASS",
         flush=True,
+    )
+
+
+def run_pdf(port: int, model: str) -> None:
+    pdf = base64.b64encode(
+        (ROOT / "dev/tests/fixtures/documents/plain.pdf").read_bytes()
+    ).decode()
+    code, document = request(
+        port,
+        "POST",
+        "/v1/messages",
+        {
+            "model": model,
+            "max_tokens": 64,
+            "thinking": {"type": "disabled"},
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": pdf,
+                            },
+                        },
+                        {"type": "text", "text": "Briefly describe the page."},
+                    ],
+                }
+            ],
+        },
+    )
+    require(
+        code == 200 and document.get("content"), f"PDF generation failed: {document!r}"
     )
 
 

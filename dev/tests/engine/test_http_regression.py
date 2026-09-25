@@ -113,9 +113,12 @@ class HttpRegressionTests(unittest.TestCase):
                 parse("community/not-installed")
             self.assertIn("missing installed model", error.getvalue())
 
-    def row(self, version, sample=0, latency=10):
+    def row(self, version, sample=0, latency=10, round=None):
         return {
             "version": version,
+            "round": {"baseline": 0, "candidate": 1}[version]
+            if round is None
+            else round,
             "sample": sample,
             "context": 2048,
             "scenario": "cold",
@@ -138,28 +141,77 @@ class HttpRegressionTests(unittest.TestCase):
             )
         self.assertNotEqual(prompts[0, 256][:32], prompts[1, 256][:32])
 
-    def test_median_gate_keeps_raw_timing_separate_from_correctness(self):
-        rows = [self.row("baseline"), self.row("candidate", latency=10.1)]
-        self.assertTrue(benchmark.summarize(rows, 0.02)[0]["pass"])
-        self.assertFalse(benchmark.summarize(rows, 0.005)[0]["pass"])
+    def abba_rows(self, latencies):
+        """Samples 0 and 1 of both versions in rounds baseline, candidate,
+        candidate, baseline with these per-round latencies."""
+        return [
+            self.row(version, sample, latency, round)
+            for round, (version, sample, latency) in enumerate(
+                zip(benchmark.ROUNDS, (0, 0, 1, 1), latencies)
+            )
+        ]
+
+    def test_abba_rule_keeps_raw_timing_separate_from_correctness(self):
+        for latencies, verdict in (
+            ((10, 10.1, 10.1, 10), "pass"),
+            ((10, 10.5, 10.5, 10), "fail"),
+            ((9.8, 10.5, 10.5, 10.2), "pass"),
+            ((9.6, 10, 10, 10.4), "inconclusive"),
+        ):
+            with self.subTest(latencies=latencies):
+                summary = benchmark.summarize(self.abba_rows(latencies))[0]
+                self.assertEqual(summary["verdict"], verdict)
+                self.assertEqual(summary["pass"], verdict == "pass")
+                self.assertEqual(summary["rounds"], list(latencies))
+                self.assertEqual(summary["samples_per_round"], [1, 1, 1, 1])
+        rows = self.abba_rows((10, 10, 10, 10))
+        with self.assertRaisesRegex(ValueError, "no samples"):
+            benchmark.summarize(rows[:3] + [{**rows[3], "round": 0}])
+
+    def test_layout_identity_is_compared_only_where_keys_must_agree(self):
+        def status(build, layout, kv="int8"):
+            return {
+                "identity": {
+                    "cache": {"build_id": build, "loaded_model_layout_sha256": layout},
+                    "kv": {"format": kv},
+                }
+            }
+
+        baseline = {"version": "baseline", **status("b", "layout-b")}
+        # Another preparation identity prepares under other keys.
+        benchmark.check_identity(
+            status("c", "layout-c"), "candidate", [baseline], False
+        )
+        for shared, current, version in (
+            (True, status("c", "layout-c"), "candidate"),
+            (False, status("b", "layout-c"), "baseline"),
+            (False, status("b2", "layout-b"), "baseline"),
+            (False, status("c", "layout-c", "bf16"), "candidate"),
+        ):
+            with (
+                self.subTest(shared=shared, current=current, version=version),
+                self.assertRaises(smoke.SmokeFailure),
+            ):
+                benchmark.check_identity(current, version, [baseline], shared)
+        benchmark.check_identity(status("c", "layout-b"), "candidate", [baseline], True)
 
     def test_missing_duplicate_or_changed_transcript_fails(self):
         baseline, candidate = self.row("baseline"), self.row("candidate")
         for rows in ([baseline], [baseline, baseline, candidate]):
             with self.assertRaises(ValueError):
-                benchmark.summarize(rows, 0.02)
+                benchmark.summarize(rows)
         for field in ("response_sha256", "prompt_sha256"):
             changed = copy.deepcopy(candidate)
             changed[field] = "different"
             with self.assertRaisesRegex(ValueError, "transcript differs"):
-                benchmark.summarize([baseline, changed], 0.02)
+                benchmark.summarize([baseline, changed])
 
     def test_decode_uses_native_decode_time_per_token(self):
-        rows = [self.row("baseline"), self.row("candidate")]
+        rows = self.abba_rows((10, 10, 10, 10))
         for row in rows:
             row["scenario"] = "decode"
             row["native_delta"] = {"decode_wall_ms": 100, "decode_output_tokens": 50}
-        summary = benchmark.summarize(rows, 0.02)[0]
+        summary = benchmark.summarize(rows)[0]
         self.assertEqual(summary["metric"], "decode_ms_per_token")
         self.assertEqual(summary["baseline_median"], 2)
 

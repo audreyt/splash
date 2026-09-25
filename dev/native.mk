@@ -446,7 +446,7 @@ $(TUNE_KERNELS): dev/tuning/tune_kernels.mm $(TUNING_SOURCES) \
 # Run on an idle host after a kernel or policy change.
 .PHONY: tune-kernels
 tune-kernels: preflight $(TARGET) $(TUNE_KERNELS) $(LIB)
-	$(TUNE_KERNELS) $(LIB) $(MODEL_ROOT) $(TUNE_ARGS)
+	$(TUNE_KERNELS) $(LIB) "$(MODEL_ROOT)" $(TUNE_ARGS)
 
 $(TEST_ATTENTION_PLAN): dev/tests/engine/paged_attention_plan_test.mm \
 		$(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
@@ -656,16 +656,22 @@ test-engine-metal: $(TEST_METAL_TARGETS)
 
 .PHONY: test-real
 # The vision fixture is named after the installed model's family: model.json
-# for an upstream model, the manifest's model for a Splash package.
+# for an upstream model, the manifest's model for a Splash package. Nothing is
+# printed when the installation serves no vision (model.json's vision_format
+# is none: --language-only, or a GGUF without an mmproj); every package has it.
 VISION_FIXTURE_FAMILY := import json, pathlib, sys; root = pathlib.Path(sys.argv[1]); \
 	record = root / "model.json"; \
-	print((json.loads(record.read_text())["family"] if record.is_file() \
+	model = json.loads(record.read_text()) if record.is_file() else None; \
+	print("" if model and model["vision_format"] == "none" else \
+	      (model["family"] if model \
 	       else json.loads((root / "manifest.json").read_text())["model"]).lower())
 test-real: preflight $(TARGET) $(TEST_MODEL_RUNTIME_ORACLE) \
 		$(TEST_VISION_ENCODER_TEST) $(LIB)
 	family=$$($(BUILD_ID_PYTHON) -c '$(VISION_FIXTURE_FAMILY)' "$(MODEL_ROOT)") && \
-		$(METAL_TEST_ENV) $(TEST_VISION_ENCODER_TEST) $(LIB) "$(MODEL_ROOT)" \
-		dev/tests/fixtures/vision-parity/$$family
+		if test -n "$$family"; then \
+			$(METAL_TEST_ENV) $(TEST_VISION_ENCODER_TEST) $(LIB) "$(MODEL_ROOT)" \
+				dev/tests/fixtures/vision-parity/$$family; \
+		else echo "vision parity: skipped, the installation serves text only"; fi
 	$(TEST_MODEL_RUNTIME_ORACLE) $(LIB) "$(MODEL_ROOT)"
 
 .PHONY: benchmark-prefill benchmark-decode benchmark-backend \
@@ -680,7 +686,7 @@ benchmark-decode: all $(TEST_Q4_DECODE_PROFILE)
 # decode-profile replays the installed model's prefill and decode commands as
 # separate dispatches; DECODE_PROFILE_ARGS passes --prompt-tokens/--cycles.
 benchmark-decode-profile: preflight $(TARGET) $(TEST_DECODE_PROFILE) $(LIB)
-	$(TEST_DECODE_PROFILE) $(LIB) $(MODEL_ROOT) $(DECODE_PROFILE_ARGS)
+	$(TEST_DECODE_PROFILE) $(LIB) "$(MODEL_ROOT)" $(DECODE_PROFILE_ARGS)
 
 # Attention kernels alone on one layer of synthetic Q8 history across cache
 # lengths; ATTENTION_SWEEP_ARGS passes --histories/--shapes/--lanes/--repeat.
@@ -700,7 +706,7 @@ benchmark-gguf-moe: $(TEST_GGUF_MOE_BENCHMARK) $(LIB)
 	$(TEST_GGUF_MOE_BENCHMARK) $(LIB) $(GGUF_MOE_ARGS)
 
 benchmark-backend: preflight $(TARGET) $(TEST_BACKEND_BENCHMARK) $(LIB)
-	$(TEST_BACKEND_BENCHMARK) $(LIB) $(MODEL_ROOT)
+	$(TEST_BACKEND_BENCHMARK) $(LIB) "$(MODEL_ROOT)"
 
 # CPU tests that also run under the sanitizers: each is built three times
 # from the same sources.

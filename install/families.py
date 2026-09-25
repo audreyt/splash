@@ -15,17 +15,39 @@ if __package__:
 else:
     import models
 
-# Splash's DFlash2 drafts share one repository, a folder per base model named
-# after it: config.json (the original DFlash2 configuration plus its "splash"
-# format and source), model.bin and layer-N.bin (models.DRAFT_LAYER_MAGIC).
-DRAFTS = "incoai-internal/Splash-DFlash2"
-
 
 @dataclass(frozen=True)
 class Draft:
-    # The commit of DRAFTS that published this family's folder.
-    revision: str
-    layers: int
+    # The repository of the DFlash2 checkpoint trained for the family, as its
+    # release publishes it: config.json and BF16 safetensors. Installations
+    # follow its default branch as they follow the target's.
+    repo: str
+    # The config.json fields, dotted into its objects, that the native draft
+    # inspection requires, with the values it requires: a commit stating
+    # others is not installed, so it never replaces a draft that loads.
+    signature: tuple[tuple[str, object], ...]
+
+    @property
+    def layers(self):
+        return dict(self.signature)["num_hidden_layers"]
+
+
+# The fields every DFlash2 draft the runtime loads states alike.
+DFLASH2 = (
+    ("architectures", ("DFlash2DraftModel",)),
+    ("sliding_window", 2048),
+    ("is_causal", False),
+    ("attention_bias", False),
+    ("tie_word_embeddings", False),
+    ("rms_norm_eps", 1e-6),
+    ("hidden_act", "silu"),
+    ("rope_parameters.rope_type", "default"),
+    ("rope_parameters.rope_theta", 10000000),
+    ("dflash_config.block_size", 8),
+    ("dflash_config.conv_group_size", 16),
+    ("dflash_config.conv_kernel_size", 2),
+    ("dflash_config.selector_top_k", 16),
+)
 
 
 @dataclass(frozen=True)
@@ -51,7 +73,22 @@ FAMILIES = (
             ("num_key_value_heads", 4),
             ("head_dim", 256),
         ),
-        Draft("f0ce2ff58f760c7e251a2a2454528273c3fa870b", 5),
+        Draft(
+            "incoai/Qwen3.8-27B-DFlash2",
+            DFLASH2
+            + (
+                ("num_hidden_layers", 5),
+                ("hidden_size", 5120),
+                ("vocab_size", 248320),
+                ("intermediate_size", 17408),
+                ("num_attention_heads", 32),
+                ("num_key_value_heads", 8),
+                ("head_dim", 128),
+                ("dflash_config.selector_rank", 256),
+                ("dflash_config.mask_token_id", 248070),
+                ("dflash_config.target_layer_ids", (5, 19, 33, 47, 61)),
+            ),
+        ),
     ),
     ModelFamily(
         "Qwen3.6-35B-A3B",
@@ -67,7 +104,22 @@ FAMILIES = (
             ("num_experts", 256),
             ("num_experts_per_tok", 8),
         ),
-        Draft("b36f132a9c832599c6d08a1443cb8bbe4c2ac6cb", 6),
+        Draft(
+            "incoai/Qwen3.6-35B-A3B-DFlash2",
+            DFLASH2
+            + (
+                ("num_hidden_layers", 6),
+                ("hidden_size", 2048),
+                ("vocab_size", 248320),
+                ("intermediate_size", 6144),
+                ("num_attention_heads", 32),
+                ("num_key_value_heads", 8),
+                ("head_dim", 128),
+                ("dflash_config.selector_rank", 256),
+                ("dflash_config.mask_token_id", 248077),
+                ("dflash_config.target_layer_ids", (1, 6, 11, 16, 22, 27, 32, 37)),
+            ),
+        ),
     ),
 )
 

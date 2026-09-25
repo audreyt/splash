@@ -905,11 +905,18 @@ int main(int argc, char **argv) {
     require(static_cast<bool>(pages.ensureResident(0)),
             "warmup refusal fixture failed to recover KV admission");
     static_cast<void>(states.releaseIdle(0, 0));
-    requireAtomicImageAdmission(executor, backend, allocationFault);
-    for (uint32_t page : pageRange(120, 4))
-      require(static_cast<bool>(pages.ensureResident(page)), "image oracle KV backing is unavailable");
-    requireImageRowsAfterReclaim(executor, backend, states, model, allocationFault);
-    requireRepeatedImagePlacements(executor, backend, states, allocationFault);
+    // The engine refuses image requests to a model without vision before they
+    // reach the runtime, which treats one as a broken invariant.
+    if (model.descriptor.hasVision()) {
+      requireAtomicImageAdmission(executor, backend, allocationFault);
+      for (uint32_t page : pageRange(120, 4))
+        require(static_cast<bool>(pages.ensureResident(page)), "image oracle KV backing is unavailable");
+      requireImageRowsAfterReclaim(executor, backend, states, model, allocationFault);
+      requireRepeatedImagePlacements(executor, backend, states, allocationFault);
+    } else {
+      require(!imagesOnly, "--images-only needs a model that serves vision");
+      std::cout << "image scenarios: skipped, the model serves text only\n";
+    }
     if (imagesOnly) {
       std::cout << "PASS model-runtime-oracle scope=images-only model=" << model.name()
                 << " (admission rollback, chunk reclaim, cache-only budget, mixed/repeated images)\n";

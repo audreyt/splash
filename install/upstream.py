@@ -5,11 +5,11 @@ The Hub owns downloads and snapshots; this module inspects the target,
 selects its components and decides when to follow the Hub, and the native
 source adapters own tensor validation and preparation. A target is
 identified by its own metadata (a GGUF header or an MLX config), read before
-any weight download, and paired with its family's pinned draft
+any weight download, and paired with the draft trained for its family
 (families.py); repository names play no part. Every start follows the
-target's revision with one Hub request and publishes a new commit's assembly
-atomically; the installed assembly starts when the Hub cannot answer or the
-new commit cannot be installed.
+target's revision, then its draft's, with one Hub request each, and
+publishes a new commit's assembly atomically; the installed assembly starts
+when the Hub cannot answer or the new commit cannot be installed.
 """
 
 from __future__ import annotations
@@ -274,12 +274,13 @@ def _validate_processor(config):
 def prepare(selection):
     """Start selection's model, installing what it needs.
 
-    Every start resolves the target's revision with one Hub request
-    (hub.Repository.resolve decides when none is made). The installed
-    assembly of that commit starts; a new commit is installed and published
-    atomically; when the Hub cannot answer, or a new commit cannot be
-    installed, the verified installation starts instead. A legacy Splash
-    package is installed by legacy.prepare."""
+    Every start resolves the target's revision, then the default branch of
+    its draft's repository, with one Hub request each (hub.Repository.resolve
+    decides when none is made). The installed assembly of those commits
+    starts; a new commit is installed and published atomically; when the Hub
+    cannot answer, or a new commit cannot be installed, the verified
+    installation starts instead. A legacy Splash package is installed by
+    legacy.prepare."""
     kind = models.installation_kind(selection.link)
     if kind == models.PACKAGE:
         legacy.prepare(selection)
@@ -317,9 +318,11 @@ def _is_legacy_package(repo, model):
 
 def _start_installed(selection, target, installed):
     """Start the verified installation of the target's commit, assembled again
-    first when this release changes it (_changes). The installation's links
-    name its files; only assembling it again reads the commit's snapshot in
-    the current Hub cache."""
+    first when its draft moved or this release changes it (_changes). The
+    draft's repository is asked only when the Hub answered for the target, so
+    a commit revision holds its draft too. The installation's links name its
+    files; only assembling it again reads the commits' snapshots in the
+    current Hub cache."""
     if target.unreachable_reason:
         print(
             f"Could not reach the Hub ({target.unreachable_reason}); "
@@ -327,12 +330,20 @@ def _start_installed(selection, target, installed):
             flush=True,
         )
     recorded = installed["sources"]["target"]
-    if changes := _changes(installed, selection):
+    family = families.named(installed["family"])
+    draft = family and _resolve_draft(family, selection, installed, target)
+    if draft and draft.unreachable_reason:
+        print(
+            f"Could not reach the Hub ({draft.unreachable_reason}); "
+            f"using the installed draft {_at(draft)}.",
+            flush=True,
+        )
+    if changes := _changes(installed, family, draft):
         print(f"Updating {selection.model}: {'; '.join(changes)}.", flush=True)
         with _keeping_installation(
             selection, installed, f"update it ({'; '.join(changes)})"
         ):
-            _install(selection, hub.Repository.recorded(recorded), installed)
+            _install(selection, hub.Repository.recorded(recorded), installed, draft)
         return
     if (replaced := _retain_installed(selection)) is None:
         print(
@@ -343,7 +354,7 @@ def _start_installed(selection, target, installed):
     # A concurrent installation replaced or damaged the assembly after it was
     # verified: no verified installation is left to keep.
     print(f"Reinstalling {selection.model}: {replaced}", flush=True)
-    _install(selection, hub.Repository.recorded(recorded), installed)
+    _install(selection, hub.Repository.recorded(recorded), installed, draft)
 
 
 def _install_commit(selection, target, installed):
@@ -400,14 +411,18 @@ def _retain_installed(selection):
     return None
 
 
-def _install(selection, repo, installed):
+def _install(selection, repo, installed, draft=None):
     """Assemble repo's target and its draft, and publish the assembly at the
-    selection link."""
+    selection link. draft is the draft's repository as this start resolved
+    it, or None to resolve it here, asking the Hub only when it answered for
+    repo."""
     # Every Hub request (header reads, downloads) happens here.
     with hub.as_model_errors(f"cannot install {selection.model}"):
         target = inspect_target(repo, selection.variant, selection.language_only)
         family = families.family_for(target.config)
-        draft, files = _draft(family, selection, installed)
+        if draft is None:
+            draft = _resolve_draft(family, selection, installed, repo)
+        draft, files = _draft(family, installed, draft)
         print(
             f"Installing {selection.model} as {family.name} ({target.format}); "
             f"draft {draft.name}; "
@@ -435,35 +450,37 @@ def _install(selection, repo, installed):
         records = {path: assembly.file_record(path) for path in set(files.values())}
         record["files"] = {name: records[path] for name, path in sorted(files.items())}
         # A new installation requires its pins before it is published; its
-        # older pins are retired once it is.
+        # older pins are retired once it is, in the repositories the
+        # assembly it replaces linked too.
         pins = [
             hub.pin(snapshot, repo_id, selection.link)
             for snapshot, repo_id in assembly.pins(record)
         ]
+        replaced = [
+            hub.pinned(snapshot, selection.link)
+            for snapshot, _ in assembly.recorded_pins(selection.link)
+        ]
         models.link_selection(
             selection.link, assembly.build(models_root, record, files)
         )
-        hub.retire_other_pins(pins)
+        hub.retire_other_pins(pins, replaced)
         assembly.collect_garbage(models_root)
 
 
-def _pinned_draft(family):
-    return {"repo": families.DRAFTS, "revision": family.draft.revision}
-
-
-def _changes(installed, selection):
-    """What this release changes in a verified assembly, from local files
-    alone: another pinned draft for its family (unless --draft-model chose
-    the draft), or another derivation of its GGUF metadata."""
-    family = families.named(installed["family"])
-    changes = []
+def _changes(installed, family, draft):
+    """What a start changes in a verified assembly of the target's installed
+    commit: the draft, when draft, as this start resolved it, is another
+    repository or commit, or the GGUF metadata, when this release derives it
+    otherwise."""
     if family is None:
-        changes.append(f"no supported family is named {installed['family']}")
-    elif not selection.draft_model and installed["sources"]["draft"] != _pinned_draft(
-        family
-    ):
+        return [f"no supported family is named {installed['family']}"]
+    changes = []
+    recorded = installed["sources"]["draft"]
+    if draft.identity() != recorded:
         changes.append(
-            f"this release pins the {family.name} draft at {family.draft.revision[:12]}"
+            f"{draft.name} moved from {recorded['revision'][:12]} to {draft.revision[:12]}"
+            if draft.name == recorded["repo"]
+            else f"its draft is now {_at(draft)}"
         )
     if installed["target_format"] == "gguf" and installed[
         "metadata"
@@ -472,66 +489,110 @@ def _changes(installed, selection):
     return changes
 
 
-def _draft(family, selection, installed):
-    """The draft repository and its downloaded files, by assembly path:
-    --draft-model as resolved at installation, or else the family's pinned
-    draft. An installation keeps its draft, from the cache, while it is the
-    one to use, and when a newly pinned one cannot be fetched."""
+def _resolve_draft(family, selection, installed, target):
+    """The draft's repository, --draft-model or else the family's DFlash2
+    release, at the commit its default branch names now: one Hub request, as
+    for the target, made only when the Hub answered for the target. Else the
+    installed draft stands in, unlisted, or without one a commit the Hub
+    cache holds for this selection; the installed draft also stands in, with
+    the reason, when the draft cannot be resolved."""
+    name = selection.draft_model or family.draft.repo
     recorded = installed and installed["sources"]["draft"]
-    keep = recorded and (selection.draft_model or recorded == _pinned_draft(family))
-    if not keep and (chosen := _new_draft(family, selection, recorded)) is not None:
-        return chosen
+    asked = _answered(target)
+    if recorded and not asked:
+        return hub.Repository(recorded["repo"], recorded["revision"], frozenset())
+    commit = recorded["revision"] if recorded and recorded["repo"] == name else None
+    try:
+        return hub.Repository.resolve(
+            name,
+            installation=selection.link,
+            installed=commit,
+            unreachable=None
+            if asked
+            else target.unreachable_reason or "the Hub did not list the target",
+        )
+    except models.ModelError as error:
+        if not recorded:
+            raise
+        return hub.Repository(
+            recorded["repo"],
+            recorded["revision"],
+            frozenset(),
+            unreachable_reason=str(error),
+        )
+
+
+def _draft(family, installed, draft):
+    """The draft repository and its downloaded files, by assembly path: draft,
+    as this start resolved it, when it is not the installed draft, or else
+    the installed one, which is kept too when draft cannot be fetched
+    (downloaded and checked)."""
+    recorded = installed and installed["sources"]["draft"]
+    if draft.identity() != recorded:
+        try:
+            with hub.as_model_errors(f"cannot fetch the {family.name} draft"):
+                return draft, _draft_files(draft, family)
+        except models.ModelError as error:
+            if not recorded:
+                raise
+            models.warn(
+                f"cannot use the {family.name} draft {_at(draft)}; "
+                f"keeping the installed one: {error}"
+            )
     repo = hub.Repository.recorded(recorded)
     return repo, _draft_files(repo, family)
 
 
-def _new_draft(family, selection, recorded):
-    """The draft chosen anew, --draft-model or the family's pinned draft, and
-    its downloaded files. None, with a warning, when it cannot be fetched
-    (resolved, downloaded and checked) and the installation recorded a draft
-    to keep."""
-    try:
-        with hub.as_model_errors(f"cannot fetch the {family.name} draft"):
-            if selection.draft_model:
-                repo = hub.Repository.resolve(
-                    selection.draft_model, installation=selection.link
-                )
-            else:
-                repo = hub.Repository.resolve(families.DRAFTS, family.draft.revision)
-            return repo, _draft_files(repo, family)
-    except models.ModelError as error:
-        if not recorded:
-            raise
-        models.warn(
-            f"cannot fetch the {family.name} draft {family.draft.revision[:12]}; "
-            f"keeping the installed one: {error}"
-        )
-        return None
+def _answered(repo):
+    """Whether the Hub answered for repo this start: resolve listed it, and
+    not from the Hub cache in the Hub's stead."""
+    return bool(repo.files) and not repo.unreachable_reason
+
+
+def _at(repo):
+    """repo@commit, or a local directory's path."""
+    return f"{repo.name}@{repo.revision[:12]}" if repo.revision else repo.name
 
 
 def _draft_files(repo, family):
-    """The family's draft files in repo, downloaded, by assembly path: its
-    folder of the shared repository, or, for a --draft-model directory, the
-    directory itself."""
-    folder = family.name + "/" if f"{family.name}/config.json" in repo.files else ""
-    layers = (f"layer-{i}.bin" for i in range(family.draft.layers))
-    names = {folder + name for name in ("config.json", "model.bin", *layers)}
-    if not names <= repo.files:
+    """The family's DFlash2 checkpoint in repo, downloaded, by assembly path:
+    config.json and the safetensors weights, model.safetensors or the shards
+    its index names, at the root of the repository or --draft-model
+    directory, as a DFlash2 release holds them. Its configuration must state
+    the family's draft signature."""
+    try:
+        if "config.json" not in repo.files:
+            raise models.ModelError("no config.json")
+        weights = _weight_files(repo)
+    except models.ModelError as error:
         raise models.ModelError(
-            f"{repo.name} does not contain the Splash DFlash2 draft for {family.name}"
-        )
-    config = models.read_json(repo.file(folder + "config.json"))
-    splash = config.get("splash")
-    if (
-        config.get("architectures") != ["DFlash2DraftModel"]
-        or config.get("hidden_size") != dict(family.signature)["hidden_size"]
-        or config.get("num_hidden_layers") != family.draft.layers
-        or not isinstance(splash, dict)
-        or splash.get("format") != models.DRAFT_LAYER_MAGIC
-    ):
+            f"{repo.name} does not contain a DFlash2 checkpoint for {family.name}"
+            f" ({error})"
+        ) from error
+    config = models.read_json(repo.file("config.json"))
+    differences = [
+        f"{key} {_config_value(config, key)!r}, not {expected!r}"
+        for key, expected in family.draft.signature
+        if not _same(_config_value(config, key), expected)
+    ]
+    if differences:
         raise models.ModelError(
-            "draft configuration is incompatible with " + family.name
+            f"draft configuration is incompatible with {family.name}: "
+            + "; ".join(differences)
         )
-    return {
-        "draft/" + Path(name).name: path for name, path in repo.download(names).items()
-    }
+    downloaded = repo.download({"config.json", *weights})
+    return {"draft/" + name: path for name, path in downloaded.items()}
+
+
+def _config_value(config, key):
+    """config's value at a key dotted into its objects, lists as tuples, or
+    None."""
+    value = config
+    for part in key.split("."):
+        value = value.get(part) if isinstance(value, dict) else None
+    return tuple(value) if isinstance(value, list) else value
+
+
+def _same(value, expected):
+    """JSON equality that tells booleans from numbers."""
+    return value == expected and isinstance(value, bool) == isinstance(expected, bool)

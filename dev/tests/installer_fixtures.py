@@ -20,6 +20,8 @@ from install import families, hub, models
 DENSE = families.named("Qwen3.8-27B")
 MOE = families.named("Qwen3.6-35B-A3B")
 MODEL = "mlx-community/Qwen3.8-27B-4bit"
+# The commit the main branch of every family's draft repository names.
+DRAFT_COMMIT = "d" * 40
 # The image preprocessing Splash implements (server/images.py).
 PROCESSOR = {
     "patch_size": 16,
@@ -46,22 +48,19 @@ def mlx_target(root, family, *, changes=None):
     return root
 
 
-def draft_dir(root, family):
-    """The drafts' repository layout: family's folder of DFlash2 files."""
-    folder = root / family.name
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "config.json").write_text(
-        json.dumps(
-            {
-                "architectures": ["DFlash2DraftModel"],
-                "hidden_size": dict(family.signature)["hidden_size"],
-                "num_hidden_layers": family.draft.layers,
-                "splash": {"format": models.DRAFT_LAYER_MAGIC},
-            }
-        )
-    )
-    for name in ("model.bin", *(f"layer-{i}.bin" for i in range(family.draft.layers))):
-        (folder / name).write_bytes(b"draft")
+def draft_dir(root, family, **changes):
+    """A DFlash2 release of family's draft: its configuration, stating the
+    draft signature with changes (dotted keys), and weights."""
+    root.mkdir(parents=True, exist_ok=True)
+    config = {}
+    for key, value in (dict(family.draft.signature) | changes).items():
+        *objects, name = key.split(".")
+        node = config
+        for part in objects:
+            node = node.setdefault(part, {})
+        node[name] = list(value) if isinstance(value, tuple) else value
+    (root / "config.json").write_text(json.dumps(config))
+    (root / "model.safetensors").write_bytes(b"draft")
     return root
 
 
@@ -177,14 +176,12 @@ class FakeHub:
 
 
 def fake_hub(test, cache, *, target=DENSE, commit="a" * 40):
-    """A FakeHub publishing MODEL at commit on main and the drafts'
-    repository at every family's pinned commit."""
+    """A FakeHub publishing MODEL at commit on main and every family's
+    draft repository at DRAFT_COMMIT on main."""
     fake = FakeHub(test, cache)
     fake.publish(MODEL, commit, lambda p: mlx_target(p, target))
     for family in families.FAMILIES:
-        fake.publish(
-            families.DRAFTS, family.draft.revision, lambda p: draft_dir(p, family)
-        )
+        fake.publish(family.draft.repo, DRAFT_COMMIT, lambda p: draft_dir(p, family))
     return fake
 
 

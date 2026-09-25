@@ -376,8 +376,7 @@ ModelDescriptor inspectSourceModel(const std::filesystem::path &root) {
         throw std::invalid_argument("draft target capture layers do not match this model");
     }
   }, result.target);
-  NSDictionary *storage = requireObject(draft, @"splash", "draft storage");
-  requireEqual(requireString(storage, @"format", "draft storage format"), kDFlashLayerMagic, "draft storage format");
+  result.draftSource = DraftSource::Checkpoint;
 
   const auto vision = requireString(record, @"vision_format", "vision format");
   if (vision == "none") result.visionSource = VisionSource::None;

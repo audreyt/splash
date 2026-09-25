@@ -98,7 +98,7 @@ def validate_manifest(path: Path):
     expected_format = {
         "section_alignment_bytes": ALIGNMENT,
         "target_layer_magic": layout.target_layer_magic,
-        "draft_layer_magic": models.DRAFT_LAYER_MAGIC,
+        "draft_layer_magic": "MDFD0004",
         "vision_magic": "MDFV0001",
     }
     if any(

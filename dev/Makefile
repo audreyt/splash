@@ -28,6 +28,10 @@ ENGINE_PYTHON_TEST_PATTERN ?= test_*.py
 # gates on a machine that lacks one of them; empty runs all four.
 AGENT_CLIENTS ?=
 AGENT_CLIENT_ARGS = $(if $(AGENT_CLIENTS),--clients $(AGENT_CLIENTS),)
+# smoke: implement and resume; complete adds compaction and cancellation.
+AGENT_SCENARIO ?= complete
+AGENT_ARGS = $(MODEL_ARGS) --package "$(MODEL_ROOT)" --scenario $(AGENT_SCENARIO) \
+	$(AGENT_CLIENT_ARGS)
 HTTP_SMOKE_ARGS ?=
 
 # Define native targets before aggregate prerequisites expand.
@@ -63,7 +67,8 @@ test-python: install-development
 # prepared-weight identity tests; none downloads or loads real weights.
 test-models: install-development
 	$(PYTHON) -m unittest dev/tests/test_models.py dev/tests/test_upstream.py \
-		dev/tests/test_weight_preparation_identity.py dev/tests/test_gguf_metadata.py
+		dev/tests/test_weight_preparation_identity.py dev/tests/test_gguf_metadata.py \
+		dev/tests/test_installer_restarts.py
 
 check-python-engine: install-development test-python test-models
 	$(PYTHON) -m compileall -q server install/*.py \
@@ -87,52 +92,64 @@ test: test-engine test-python test-models
 
 test-http-real: preflight $(TARGET) verify-build-identity
 	TRANSFORMERS_VERBOSITY=error $(PYTHON) dev/tests/smoke_real.py \
-		--model "$(MODEL)" $(HTTP_SMOKE_ARGS)
+		--model "$(MODEL)" --package "$(MODEL_ROOT)" $(HTTP_SMOKE_ARGS)
 
 agent-preflight: model-selection install-development
-	$(PYTHON) dev/tests/agent_real.py --model "$(MODEL)" --preflight-only $(AGENT_CLIENT_ARGS)
+	$(PYTHON) dev/tests/agent_real.py $(AGENT_ARGS) --preflight-only
 
 test-agent-real: preflight $(TARGET) agent-preflight verify-build-identity
-	TRANSFORMERS_VERBOSITY=error $(PYTHON) dev/tests/agent_real.py --model "$(MODEL)" \
-		$(AGENT_CLIENT_ARGS)
+	TRANSFORMERS_VERBOSITY=error $(PYTHON) dev/tests/agent_real.py $(AGENT_ARGS)
 
 # The release path loads the model once for generic HTTP and all four official
 # clients. The individual targets remain useful while diagnosing one surface.
 test-release-real: preflight $(TARGET) agent-preflight verify-build-identity
-	TRANSFORMERS_VERBOSITY=error $(PYTHON) dev/tests/agent_real.py \
-		--model "$(MODEL)" --http-smoke $(AGENT_CLIENT_ARGS)
+	TRANSFORMERS_VERBOSITY=error $(PYTHON) dev/tests/agent_real.py $(AGENT_ARGS) \
+		--http-smoke
 
-# Characterizes and validates one source identity. This target deliberately
-# does not claim an old/new regression result; that requires two retained
-# benchmark binaries and same-machine alternating execution.
+# BASELINE is a checkout whose build/ holds another build's splash.metallib
+# and engine-tests/backend-benchmark: this build is compared with it on this
+# machine in ABBA order (dev/benchmarks/backend_regression.py). Without it,
+# the release scenarios characterize this build alone.
+BASELINE ?=
 test-performance-real: preflight $(TARGET) $(TEST_BACKEND_BENCHMARK) $(LIB)
-	@mkdir -p build/release
+	@mkdir -p "$(MODEL_RESULTS)"
 	@$(BUILD_ID_PYTHON) $(BUILD_ID_SCRIPT) check --root . \
 		--header $(BUILD_ID_HEADER) --stamp $(BUILD_ID_STAMP) \
 		$(BUILD_ID_CONSTANT_ARGS) --binary $(TEST_BACKEND_BENCHMARK)
+ifneq ($(BASELINE),)
+	$(PYTHON) -m dev.benchmarks.backend_regression --baseline "$(BASELINE)" \
+		--package "$(MODEL_ROOT)" --output-dir "$(MODEL_RESULTS)"
+else
 	@set +e; \
-		$(TEST_BACKEND_BENCHMARK) $(LIB) $(MODEL_ROOT) --samples 5 \
-			--progress build/release/backend-benchmark-progress.jsonl \
-			> build/release/backend-benchmark.json; \
+		$(TEST_BACKEND_BENCHMARK) $(LIB) "$(MODEL_ROOT)" \
+			--scenario decode,partial --samples 3 \
+			--progress "$(MODEL_RESULTS)/backend-benchmark-progress.jsonl" \
+			> "$(MODEL_RESULTS)/backend-benchmark.json"; \
 		status=$$?; \
-		$(PYTHON) -m json.tool build/release/backend-benchmark.json >/dev/null \
+		$(PYTHON) -m json.tool "$(MODEL_RESULTS)/backend-benchmark.json" >/dev/null \
 			|| exit 1; \
 		test $$status -eq 0 || exit $$status
-	@echo "native backend characterization: PASS (build/release/backend-benchmark.json)"
+	@echo "native backend characterization: PASS ($(MODEL_RESULTS)/backend-benchmark.json)"
+endif
 
-# One final source identity: model-free correctness, sanitizers, real-model
-# correctness, one shared HTTP/four-client server, then native performance.
-release-check: check preflight
+# One model on this machine against BASELINE, a retained build that loads it
+# (DEVELOPMENT.md, Release check); make check and test-sanitizers run once per
+# source identity, check-native-metal and the agent clients once per machine.
+# verify-models follows test-real, whose load prepares the weights it records.
+release-check: preflight
+	@test -n "$(BASELINE)" || { \
+		echo "error: release-check compares with BASELINE, a retained build that loads the model" >&2; \
+		exit 1; \
+	}
 	@test -z "$$(git status --porcelain)" || { \
 		echo "error: release checkout is not clean" >&2; \
 		git status --short >&2; \
 		exit 1; \
 	}
-	$(MAKE) --no-print-directory verify-models
 	$(MAKE) --no-print-directory verify-build-identity
-	$(MAKE) --no-print-directory test-sanitizers
 	$(MAKE) --no-print-directory test-real
-	$(MAKE) --no-print-directory test-release-real
+	$(MAKE) --no-print-directory verify-models
+	$(MAKE) --no-print-directory test-http-real
 	$(MAKE) --no-print-directory test-performance-real
 	@test -z "$$(git status --porcelain)" || { \
 		echo "error: release checkout is not clean" >&2; \

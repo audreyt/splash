@@ -116,12 +116,17 @@ def pin_owner(installation: Path) -> str:
     return hashlib.sha256(os.fsencode(owner)).hexdigest()
 
 
+def pinned(path: Path, installation: Path) -> Path:
+    """installation's pin of the snapshot at path, the reference pin writes:
+    refs/splash/<installation>/<commit> in its repository's folder."""
+    return path.parent.parent / "refs" / "splash" / pin_owner(installation) / path.name
+
+
 def pin(path: Path, repo_id: str, installation: Path) -> Path:
-    """Pin the snapshot at path for installation
-    (refs/splash/<installation>/<commit>), so pruning the Hub cache cannot
-    remove files the installation links."""
+    """Pin the snapshot at path for installation (pinned), so pruning the Hub
+    cache cannot remove files the installation links."""
     commit = snapshot_commit(path, repo_id)
-    ref = path.parent.parent / "refs" / "splash" / pin_owner(installation) / commit
+    ref = pinned(path, installation)
     try:
         existing = ref.read_text()
     except FileNotFoundError:
@@ -144,13 +149,14 @@ def pin(path: Path, repo_id: str, installation: Path) -> Path:
     return ref
 
 
-def retire_other_pins(pins):
-    """Remove the installation's pins beside pins. Call it only after
-    publishing and verifying the installation these pin; other installations
-    own other folders."""
+def retire_other_pins(pins, replaced=()):
+    """Remove the installation's pins beside pins, and beside replaced, its
+    pins before these, which may be in repositories pins do not name. Call
+    it only after publishing and verifying the installation these pin; other
+    installations own other folders."""
     try:
-        for ref in pins:
-            for previous in ref.parent.iterdir():
+        for folder in {ref.parent for ref in (*pins, *replaced)}:
+            for previous in folder.iterdir() if folder.is_dir() else ():
                 if previous not in pins and models.is_hex_digest(previous.name, 40):
                     previous.unlink()
     except OSError as error:
@@ -228,7 +234,9 @@ class Repository:
         return cls.cached(source["repo"], source["revision"])
 
     @classmethod
-    def resolve(cls, name, revision=None, *, installation=None, installed=None):
+    def resolve(
+        cls, name, revision=None, *, installation=None, installed=None, unreachable=None
+    ):
         """name at the commit revision names now. This decides whether the
         Hub is asked.
 
@@ -242,8 +250,10 @@ class Repository:
         Hub cache. Otherwise one request resolves revision. When the Hub
         cannot answer, installed stands in the same way, with the reason in
         unreachable_reason; without it, the cached snapshot of a commit this
-        selection already names does (_cached_commits). A different revision
-        is never substituted."""
+        selection already names does (_cached_commits). unreachable, why the
+        Hub did not answer for another repository this start, stands for its
+        answer without a request. A different revision is never
+        substituted."""
         import httpx
         from huggingface_hub import HfApi, constants
 
@@ -256,6 +266,8 @@ class Repository:
             return cls(name, installed, frozenset())
         if constants.HF_HUB_OFFLINE:
             why = "HF_HUB_OFFLINE is set"
+        elif unreachable:
+            why = unreachable
         else:
             try:
                 info = HfApi().model_info(

@@ -14,7 +14,13 @@ from transformers import AutoTokenizer
 
 from dev.tests import fixture_files
 from dev.tests.fixture_files import GGUF_TYPE_ARRAY, GGUF_TYPE_STRING
-from dev.tests.installer_fixtures import MOE, FakeHub, draft_dir, selection
+from dev.tests.installer_fixtures import (
+    DRAFT_COMMIT,
+    MOE,
+    FakeHub,
+    draft_dir,
+    selection,
+)
 from install import assembly, families, gguf, hub, models, upstream
 
 GGUF_REPO = "unsloth/Qwen3.6-35B-A3B-GGUF"
@@ -550,7 +556,7 @@ class GgufMetadataTests(unittest.TestCase):
 
         fake = FakeHub(self, self.root / "hub")
         fake.publish(GGUF_REPO, "a" * 40, build)
-        fake.publish(families.DRAFTS, MOE.draft.revision, lambda p: draft_dir(p, MOE))
+        fake.publish(MOE.draft.repo, DRAFT_COMMIT, lambda p: draft_dir(p, MOE))
         return fake
 
     @staticmethod
@@ -574,7 +580,7 @@ class GgufMetadataTests(unittest.TestCase):
                 self.assertIn(f"Selected model-Q4_K_M.gguf from {GGUF_REPO}.", output)
                 self.assertEqual(
                     fake.requests,
-                    [(GGUF_REPO, None), (families.DRAFTS, MOE.draft.revision)],
+                    [(GGUF_REPO, None), (MOE.draft.repo, None)],
                 )
                 assembly.verify(chosen.link, full=True)
                 config = models.read_json(chosen.link / "config.json")
@@ -593,14 +599,8 @@ class GgufMetadataTests(unittest.TestCase):
                 [
                     f"{GGUF_REPO}/mmproj-F32.gguf",
                     f"{GGUF_REPO}/model-Q4_K_M.gguf",
-                    *(
-                        f"{families.DRAFTS}/{MOE.name}/{name}"
-                        for name in (
-                            "config.json",
-                            "model.bin",
-                            *(f"layer-{i}.bin" for i in range(MOE.draft.layers)),
-                        )
-                    ),
+                    f"{MOE.draft.repo}/config.json",
+                    f"{MOE.draft.repo}/model.safetensors",
                 ]
             ),
         )
@@ -657,8 +657,11 @@ class GgufMetadataTests(unittest.TestCase):
             mock.patch("huggingface_hub.constants.HF_HUB_OFFLINE", offline),
         ):
             output = self.prepare(chosen)
-        # The unchanged target is assembled again from the cache.
-        self.assertEqual(fake.requests, [] if offline else [(GGUF_REPO, None)])
+        # The unchanged target and draft are assembled again from the cache.
+        self.assertEqual(
+            fake.requests,
+            [] if offline else [(GGUF_REPO, None), (MOE.draft.repo, None)],
+        )
         self.assertEqual(fake.downloads, [])
         self.assertIn("the GGUF metadata adapter changed", output)
         rebuilt = assembly.verify(chosen.link)["metadata"]

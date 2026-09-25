@@ -1,4 +1,5 @@
 #include "DFlashDraft.hpp"
+#include "DraftCheckpoint.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -267,11 +268,12 @@ void DFlashDraft::addContextCommit(
   }
 }
 
-DFlashDraftWeights
-loadDFlashDraftWeights(metal::MetalBackend &backend,
-                       const std::filesystem::path &directory,
-                       DFlashDraftLayout layout) {
-  requireLayout(layout);
+namespace {
+
+// Reads a draft's files in their section order: each layer, then model.bin.
+template <class Files>
+DFlashDraftWeights readDraft(metal::MetalBackend &backend, Files &files,
+                             const DFlashDraftLayout &layout) {
   const uint64_t allocationBaseline = backend.memoryStats().allocatedBytes;
   DFlashDraftWeights result;
   result.layout = layout;
@@ -285,10 +287,7 @@ loadDFlashDraftWeights(metal::MetalBackend &backend,
       "draft head norm bytes");
 
   for (uint32_t layerIndex = 0; layerIndex < layout.layers; ++layerIndex) {
-    const std::string filename =
-        "layer-" + std::to_string(layerIndex) + ".bin";
-    WeightFile file(backend, directory / filename, "draft/" + filename,
-                    kDFlashLayerMagic, layerIndex, 0);
+    WeightFile file = files.layer(layerIndex);
     DFlashDraftLayerWeights layer;
     layer.inputNorm = readNorm(file, layout.hiddenSize, false, "input-norm");
     layer.attentionConvolution =
@@ -320,8 +319,7 @@ loadDFlashDraftWeights(metal::MetalBackend &backend,
   }
 
   {
-    WeightFile file(backend, directory / "model.bin", "draft/model.bin",
-                    kDFlashLayerMagic, layout.layers, 1);
+    WeightFile file = files.model();
     result.contextProjection = readAffineProjection(
         file, layout.hiddenSize, layout.targetHiddenSize,
         "context-projection");
@@ -345,6 +343,29 @@ loadDFlashDraftWeights(metal::MetalBackend &backend,
   result.actualAllocatedBytes = metal::allocationDelta(
       allocationBaseline, backend.memoryStats().allocatedBytes);
   return result;
+}
+
+} // namespace
+
+WeightFile PackedDraftFiles::layer(uint32_t index) const {
+  const std::string filename = "layer-" + std::to_string(index) + ".bin";
+  return WeightFile(backend, directory / filename, "draft/" + filename,
+                    kDFlashLayerMagic, index, 0);
+}
+
+WeightFile PackedDraftFiles::model() const {
+  return WeightFile(backend, directory / "model.bin", "draft/model.bin",
+                    kDFlashLayerMagic, layout.layers, 1);
+}
+
+DFlashDraftWeights loadDFlashDraftWeights(metal::MetalBackend &backend,
+                                          const DraftFiles &files,
+                                          DFlashDraftLayout layout) {
+  requireLayout(layout);
+  if (const auto *checkpoint =
+          std::get_if<std::reference_wrapper<DraftCheckpointLoader>>(&files))
+    return readDraft(backend, checkpoint->get(), layout);
+  return readDraft(backend, std::get<PackedDraftFiles>(files), layout);
 }
 
 } // namespace splash::model

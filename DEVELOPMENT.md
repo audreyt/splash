@@ -118,7 +118,8 @@ part: `hub.py` the sources, the Hub cache and its pins; `assembly.py` the
 assembly layout, its build, verification and garbage collection, and the
 metadata derived from a GGUF; `families.py` the registry; `legacy.py` Splash
 packages; and `models.py` model IDs, selections, the installation lock and the
-command line (`install/models.py --model ID prepare|verify`). The assembly's
+command line (`install/models.py --model ID prepare|verify|link`, where `link`
+prints the selection link). The assembly's
 `model.json` records the resolved sources and selected formats. The native
 loader reads it, and `splash serve`, `test-http-real` and the HTTP regression
 benchmark hold it while they run, so a concurrent installation cannot collect
@@ -150,31 +151,38 @@ Installation resolves each source's revision to a commit once, downloads by
 that commit and records it in `model.json`, so a repository update cannot mix
 files from different revisions. It pins those snapshots in the Hub cache
 (`refs/splash/<installation>/<commit>`), so pruning the cache cannot remove files
-an installed model links.
+an installed model links. Publishing a new assembly retires the installation's
+other pins, in the repositories it links and in those its predecessor linked,
+so pruning can free what no installation links any more.
 
 Every start resolves the target's revision (the default branch, or
-`--revision`) with one Hub request of at most 5 seconds (`hub.HUB_TIMEOUT`);
-`hub.Repository.resolve` alone decides whether the Hub is asked:
+`--revision`) with one Hub request of at most 5 seconds (`hub.HUB_TIMEOUT`),
+and when the Hub answered, the default branch of the draft's repository
+([Drafts](#drafts)) with another; `hub.Repository.resolve` alone decides
+whether the Hub is asked:
 
-- The installed commit: the assembly's links, sizes and times are checked and
-  it starts. It is re-assembled first when this release pins another draft for
-  the family or changed the GGUF metadata adapter; if that draft cannot be
-  fetched, the installed one is kept.
+- The installed commits: the assembly's links, sizes and times are checked and
+  it starts. It is re-assembled first when the draft's repository moved or
+  this release changed the GGUF metadata adapter; if the new draft cannot be
+  fetched or is not the family's ([Drafts](#drafts)), the installed one is
+  kept.
 - A new commit: only changed files are downloaded, and the new assembly
   replaces the installed one atomically once published.
 - No answer, or a new commit that cannot be installed: the installed model
   starts, with one line naming the Hub's reason or, on stderr, the
   installation attempt that failed.
-- A 40-hex `--revision` never moves and `HF_HUB_OFFLINE=1` forbids the Hub:
-  both start a verified installation without a request.
+- A 40-hex `--revision` never moves, nor does its draft, and
+  `HF_HUB_OFFLINE=1` forbids the Hub: both start a verified installation
+  without a request.
 
 There is no update flag; to stay on one commit, pass it as `--revision`. A
 missing assembly, or one that no longer verifies, is built again. Without the
 Hub it is built from a cached snapshot, of the commit the `--revision` names,
 or else the one the installation recorded or pinned, or one the Hub cache
 records for the branch, never of another revision. Only files downloaded before
-are available, which is enough to rebuild a damaged or deleted assembly. The
-installer never rewrites upstream files.
+are available, which is enough to rebuild a damaged or deleted assembly; a new
+selection needs the Hub once for its draft's default branch. The installer
+never rewrites upstream files.
 
 ### Model cache
 
@@ -190,28 +198,25 @@ HF_HUB_CACHE=/Volumes/Models/huggingface splash serve --model mlx-community/Qwen
 existing downloads are not moved. Prepared weights have their own cache,
 which this does not move ([Weight preparation](#weight-preparation)).
 
-### Draft assets
+### Drafts
 
-Splash's DFlash2 drafts share one Hub repository, `families.DRAFTS`, with a
-folder per base model named after it: `Qwen3.8-27B/` and `Qwen3.6-35B-A3B/`.
-Each folder holds `config.json`, `model.bin` and `layer-N.bin`. The
-configuration is the original DFlash2 configuration with
-`splash.format = "MDFD0004"` and `splash.source`, the DFlash2 checkpoint the
-weights came from; native loading validates it against the target. The weights
-are the verified Q4 drafts of the Splash packages, not a quantization made at
-startup. Each family pins the commit that published its folder
-(`Draft.revision` in `families.FAMILIES`), and installation downloads only that
-folder.
-
-To prepare a folder from a verified existing package:
-
-```bash
-python dev/tools/export_draft.py PACKAGE ORIGINAL_DRAFT_CONFIG DRAFTS/Qwen3.6-35B-A3B
-```
-
-The exporter verifies existing artifact hashes and copies only draft files.
-`--draft-model` accepts such a folder, a local copy of the whole repository, or
-another Hub repository with the same layout.
+Each family names the repository of the DFlash2 checkpoint trained for it
+(`Draft` in `families.FAMILIES`), which holds it as the release publishes it:
+`config.json` and BF16 `model.safetensors` (or the shards its index names).
+Installation downloads only those files and follows the repository's default
+branch as it follows the target's ([Revisions](#revisions)); `--draft-model`
+accepts another repository, followed the same way, or a local directory that
+holds them. A checkpoint is installed only when its configuration states the
+family's draft signature (`Draft.signature`), every field and value native
+loading requires, so a draft of another architecture never replaces one that
+loads. Native loading validates the configuration against the target and
+prepares the draft like a target ([Weight preparation](#weight-preparation)):
+`DraftCheckpointLoader` (`DraftCheckpoint.cpp`) plans the packed draft files
+of a Splash package, `layer-<N>.bin` and `model.bin`, and `AffinePreparation`
+quantizes each projection to 4 bits in groups of 64 as MLX's affine
+quantization rounds it and copies every other tensor as stored. For both
+families the prepared files are byte for byte the Q4 drafts of the Splash
+packages.
 
 ### Tokenizer and chat templates
 
@@ -298,36 +303,40 @@ launchers configure OpenCode and Hermes without attachments.
 
 ### Weight preparation
 
-Source adapters write a model's target and vision tensors into prepared files:
-an MLX target and any vision tower into the packed layouts of Splash packages,
-which run the same kernels, and a GGUF target into the `MDGG0001` layout of the
-GGUF kernels. Each adapter is a loader, which validates the source's metadata
-and plans its files, and a writer: `AffineTargetLoader` (`AffineTarget.cpp`)
-and `AffinePreparation` for an MLX target, `GgufTargetLoader`
-(`GgufTarget.cpp`, planned by `GgufImage.cpp`) and `GgufPreparation` for a GGUF
-target, `VisionLoader` and `VisionPreparation` for an MLX or GGUF vision tower.
-They open their files through `PreparedFiles`, the `PreparedWeights` cache with
-the load's guards. `AffinePreparation` reorders codes, scales and biases into
-256-row tiles without requantization and computes GDN decay as
-`float(-exp(double(A_log)))`, which may differ by one float ULP in this small
-vector from packages produced with MLX's float exponential. `GgufPreparation`
-repacks GGUF blocks ([GGUF targets](#gguf-targets)).
+Source adapters write a model's target, draft and vision tensors into prepared
+files: an MLX target, the DFlash2 draft and any vision tower into the packed
+layouts of Splash packages, which run the same kernels, and a GGUF target into
+the `MDGG0001` layout of the GGUF kernels. Each adapter is a loader, which
+validates the source's metadata and plans its files, and a writer:
+`AffineTargetLoader` (`AffineTarget.cpp`) and `AffinePreparation` for an MLX
+target, `DraftCheckpointLoader` (`DraftCheckpoint.cpp`) and `AffinePreparation`
+for the draft, `GgufTargetLoader` (`GgufTarget.cpp`, planned by `GgufImage.cpp`)
+and `GgufPreparation` for a GGUF target, `VisionLoader` and `VisionPreparation`
+for an MLX or GGUF vision tower. They open their files through `PreparedFiles`,
+the `PreparedWeights` cache with the load's guards. `AffinePreparation` reorders
+an MLX target's codes, scales and biases into 256-row tiles without
+requantization, quantizes the draft's BF16 projections into the same tiles
+([Drafts](#drafts)) and computes GDN decay as `float(-exp(double(A_log)))`,
+which may differ by one float ULP in this small vector from packages produced
+with MLX's float exponential. `GgufPreparation` repacks GGUF blocks ([GGUF
+targets](#gguf-targets)).
 
-Preparation never rounds a weight. A tensor it converts to BF16 (vision tensors
-stored as F32 or F16, a GGUF's convolution taps and time-step bias) must be
-exactly representable in BF16; otherwise preparation fails, naming the tensor
-and, for a vision tensor, its file.
+Preparation never rounds a target or vision weight, and rounds the draft's
+projections only as the packages' drafts are rounded. A tensor it converts to
+BF16 (vision tensors stored as F32 or F16, a GGUF's convolution taps and
+time-step bias) must be exactly representable in BF16; otherwise preparation
+fails, naming the tensor and, for a vision tensor, its file.
 
 The cache is `~/Library/Caches/Splash/weights`, or the directory
 `SPLASH_WEIGHT_CACHE` names; nothing else selects it. It holds an additional
-copy of the weights about the model's size, its prepared target and vision
-tensors. Preparing needs that much free disk space plus a 2 GiB reserve: before
-anything is written, the factory (`ModelFactory.cpp`) constructs the vision
-tower's loader (`planVisionLoader`, which the vision encoder test shares) and
-the target's, and checks the space of every missing file they plan, plus the
-reserve, once. Uninstalling a model does not delete possibly
-shared prepared weights. With Splash stopped, entry directories can be deleted;
-deleting the whole cache causes preparation at the next load.
+copy of the weights about the model's size, its prepared target, draft and
+vision tensors. Preparing needs that much free disk space plus a 2 GiB reserve:
+before anything is written, the factory (`ModelFactory.cpp`) constructs the
+vision tower's loader (`planVisionLoader`, which the vision encoder test
+shares), the draft's and the target's, and checks the space of every missing
+file they plan, plus the reserve, once. Uninstalling a model does not delete
+possibly shared prepared weights. With Splash stopped, entry directories can be
+deleted; deleting the whole cache causes preparation at the next load.
 
 A prepared file's key hashes its adapter's preparation identity, its plan, and
 the bytes, type and shape of every source tensor it reads, located and hashed
@@ -767,18 +776,21 @@ supported Metal device and runs the kernel tests under shader validation. They
 include the preparation of small synthetic MLX, GGUF and vision sources and the
 GGUF kernels on synthetic tensors. Hosted CI runs CPU checks and sanitizers.
 
-The real-model targets take `MODEL` exactly as `splash serve --model` does and
-run the installation `make install MODEL=...` prepared in this checkout's
+The real-model targets take `MODEL` exactly as `splash serve --model` does,
+and `REVISION`, `DRAFT_MODEL` and `LANGUAGE_ONLY=1` as its `--revision`,
+`--draft-model` and `--language-only`, and run the installation
+`make install MODEL=...` with the same options prepared in this checkout's
 `install/models`:
 
 | Target | Runs |
 | --- | --- |
-| `test-real` | vision parity with the family's fixture in `dev/tests/fixtures/vision-parity/`, and the native model runtime oracle |
+| `verify-models` | the installer's restarts without the Hub, `verify --full`, and the prepared-weight record (`dev/tools/installer_restarts.py`, [Release check](#release-check)) |
+| `test-real` | vision parity with the family's fixture in `dev/tests/fixtures/vision-parity/` when the installation serves vision, and the native model runtime oracle |
 | `test-http-real` | the HTTP frontend on an isolated server (`dev/tests/smoke_real.py`) |
-| `test-agent-real` | the four official clients through `splash serve` (`dev/tests/agent_real.py`) |
+| `test-agent-real` | the four official clients through `splash serve` (`dev/tests/agent_real.py`), in `AGENT_SCENARIO` `complete` (the default) or `smoke` |
 | `test-release-real` | the HTTP smoke and all four clients on one `splash serve` |
-| `test-performance-real` | the native prefill, decode and batch benchmark |
-| `release-check` | `check`, `verify-models`, sanitizers, `test-real`, `test-release-real`, `test-performance-real` |
+| `test-performance-real` | the native decode and partial-prefix benchmark, or with `BASELINE` its ABBA comparison with that build (`dev/benchmarks/backend_regression.py`) |
+| `release-check` | one model on this Mac ([Release check](#release-check)) |
 
 `benchmark-backend`, `benchmark-decode-profile` and `tune-kernels` take `MODEL`
 the same way. The models they are run with, one per family and source format:
@@ -790,13 +802,7 @@ the same way. The models they are run with, one per family and source format:
 
 The source formats load differently: an MLX target is prepared into the packed
 layout, a GGUF target into its own layout for the GGUF projection and MoE
-kernels, and a package's packed files are mapped as they are. Before release,
-install all four agents and run `make release-check MODEL=...` for each model
-from a clean checkout. It includes correctness, sanitizers, real HTTP/client
-behavior and performance characterization. The hardware release gate
-(`release-hardware` in `.github/workflows/ci.yml`) runs it on self-hosted Macs
-for the two Splash packages only, so its real-model part exercises neither the
-preparation of a real MLX model nor a GGUF model.
+kernels, and a package's packed files are mapped as they are.
 
 `make test-engine-cpu` builds the affine source oracle so it cannot break
 unnoticed, but no target runs it because it needs real models: after
@@ -815,6 +821,68 @@ header, since GGUF projection and MoE plans read no tuned choice
 ([GGUF targets](#gguf-targets)). Keep generated reports, profiles, local paths
 and experiment notes out of the source tree and commits.
 
+### Release check
+
+A release is checked once per source identity, and then on each Apple GPU
+family (an Apple9 M3 and an Apple10 M5) against a retained baseline build,
+`BASELINE`: a checkout whose `build/` holds `splash`, `splash.metallib` and
+`engine-tests/backend-benchmark`. `release-check` fails without it. The
+baseline must load the model: it is the previous release's build when that
+loads the model. Splash 1.0.x loads only Splash packages, so for 1.1, the
+first release that loads upstream models, an upstream model's baseline is a
+build of the last commit before the change under test; the legacy package can
+always be compared with 1.0.2. From a clean checkout:
+
+```sh
+make check test-sanitizers                      # once, model-free
+make check-native-metal                         # once on each Mac
+make install release-check MODEL=mlx-community/Qwen3.8-27B-4bit REVISION=<commit> BASELINE=../splash-baseline
+make install release-check MODEL=unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M LANGUAGE_ONLY=1 REVISION=<commit> BASELINE=...
+make install release-check MODEL=mlx-community/Qwen3.6-35B-A3B-4bit REVISION=<commit> BASELINE=...
+make install release-check MODEL=unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M REVISION=<commit> BASELINE=...
+make install release-check MODEL=incoai/Qwen3.8-27B-Splash BASELINE=../splash-1.0.2
+make install verify-models MODEL=mlx-community/Qwen3.6-35B-A3B-4bit
+make test-agent-real MODEL=mlx-community/Qwen3.6-35B-A3B-4bit REVISION=<commit> AGENT_SCENARIO=smoke AGENT_CLIENTS=...
+```
+
+Pin each upstream model to one commit, the same on both Macs. Without a Hub
+token for a private draft repository, set `DRAFT_MODEL` to a local copy of the
+draft's checkpoint ([Drafts](#drafts)). The Metal suite depends on the GPU
+family, so it runs once on each Mac. Per model, `release-check`:
+
+- runs the runtime oracle and, when the installation serves vision, vision
+  parity (`test-real`);
+- restarts the installer offline, with the Hub unreachable
+  (`HF_ENDPOINT=http://127.0.0.1:9`) and with an empty `HF_HUB_CACHE`: each
+  restart must start the same assembly within 10 seconds, name the Hub's
+  reason on one line when it asked the Hub ([Revisions](#revisions)), and
+  download nothing. It then hashes the sources and records in
+  `prepared.json` the component and SHA-256 of every prepared-weight entry
+  the installation loads (`verify-models`; a legacy package is only hashed);
+- runs the HTTP smoke, which for a text-only installation checks the 400s
+  instead of images (`test-http-real`);
+- compares this build with `BASELINE`, which must have another build
+  identity, in ABBA order (`test-performance-real`): output tokens and
+  acceptance must be identical (`EXPECT_OUTPUT_CHANGE=1` allows changed
+  outputs with acceptance within 0.02), and so must the prepared bytes,
+  which a baseline of another preparation identity prepares into a cache of
+  its own; decode and prefill GPU time may regress by at most the larger of
+  2% and twice the run's own ABBA spread, and a spread above 5% fails as
+  inconclusive.
+
+Results go to `build/release/<owner>--<repo>[--VARIANT]/`. Preparation does not
+depend on the GPU, so each model's `prepared.json` must be identical on the
+two Macs. The unpinned `verify-models`, run after the pinned ones while the
+default branch still names the pinned commit, resolves the branch online, and
+its unreachable-Hub restart must fall back with the Hub's reason. The agent
+clients depend on neither the model's format nor the GPU: run the smoke
+scenario once per Mac, with the four clients split between the Macs, and
+`AGENT_SCENARIO=complete` for one model when the client integration changed.
+Expect about 1.5 hours on an M5 Pro and 2.5 hours on an M3 Max, most of it in
+the three 27B comparisons. A laptop can cap its GPU power during a long
+comparison and so make it inconclusive; rerun `make test-performance-real` for
+that model alone once the Mac has cooled.
+
 ### Local benchmarks
 
 From a source checkout with the model installed, use the native benchmark for
@@ -822,11 +890,17 @@ prefill, decode and batch measurements:
 
 ```sh
 make test-performance-real MODEL=mlx-community/Qwen3.8-27B-4bit
+make test-performance-real MODEL=mlx-community/Qwen3.8-27B-4bit BASELINE=/path/to/baseline
 ```
 
-It writes `build/release/backend-benchmark.json`; repeat it for each model.
-This characterizes one build; it is not a comparison with another engine or a
-test of agent task quality.
+The first characterizes this build: the decode widths B1-B4 and a 14,096-token
+partial-prefix request, three samples each, in
+`build/release/<owner>--<repo>[--VARIANT]/backend-benchmark.json`;
+`make benchmark-backend MODEL=...` adds the 2K to 128K contexts. The second
+compares this build with a retained checkout's in ABBA order, as the release
+check does ([Release check](#release-check)), and writes
+`backend-regression.json` there. Neither is a comparison with another engine
+or a test of agent task quality.
 
 For a same-machine HTTP regression check, retain the previous `splash` binary
 **and its adjacent `splash.metallib`**, then run from the candidate checkout:
@@ -840,8 +914,9 @@ For a same-machine HTTP regression check, retain the previous `splash` binary
 
 It takes any installed model and, for an upstream one, holds its assembly for
 the whole run, so every round serves the same model. It starts isolated servers
-in alternating order, compares matched cold, exact-prefix and decode requests,
-and saves `build/release/http-regression.json`.
+in ABBA order, compares matched cold, exact-prefix and decode requests by the
+release check's speed rule and prepared bytes, and saves
+`build/release/http-regression.json`.
 It does not contact your running server. Use the same power mode and charger,
 stop other GPU workloads, and report chip/GPU cores, memory, Splash version,
 model revision, actual input/output token counts, and cache hits with results.
