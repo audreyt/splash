@@ -32,6 +32,18 @@ void run(const PreparationCheck &check) {
   if (check) check();
 }
 
+// A source is a model's own file, not the cache's, so its failures name it.
+[[noreturn]] void failSource(const char *operation, const std::filesystem::path &path) {
+  throw std::system_error(errno, std::generic_category(),
+                          std::string(operation) + " " + path.string());
+}
+
+int openSource(const std::filesystem::path &path) {
+  const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) failSource("open weight source", path);
+  return fd;
+}
+
 // Whether name is a cache key: 64 lowercase hex digits.
 bool isKey(std::string_view name) {
   return name.size() == 64 && name.find_first_not_of("0123456789abcdef") == name.npos;
@@ -422,8 +434,8 @@ struct WeightSource::Impl {
   // The tensor data's digest, once hashed.
   std::optional<std::string> digest;
   Impl(const std::filesystem::path &path, PreparationCheck check)
-      : path(path), file(open(path.c_str(), O_RDONLY | O_CLOEXEC)), check(std::move(check)) {
-    if (fstat(file, &state)) fail("stat weight source");
+      : path(path), file(openSource(path)), check(std::move(check)) {
+    if (fstat(file, &state)) failSource("stat weight source", path);
   }
 };
 

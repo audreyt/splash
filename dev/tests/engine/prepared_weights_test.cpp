@@ -265,6 +265,10 @@ void changedSourcesAreRejected(Cache &cache) {
   std::filesystem::rename(path, cache.root / "old-source");
   std::filesystem::copy_file(cache.root / "old-source", path);
   rejects([&] { beforeReplacement.checkUnchanged(); }, "source weights changed", "replaced source was accepted");
+  // A source that cannot be opened is named, not taken for the cache.
+  const auto missing = cache.root / "missing.gguf";
+  rejects([&] { static_cast<void>(WeightSource(missing)); }, "open weight source " + missing.string(),
+          "a missing source was reported without its path");
 }
 
 // A prepared file is mapped only as the cache verified it (WeightFile): not
