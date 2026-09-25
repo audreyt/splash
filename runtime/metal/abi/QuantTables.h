@@ -13,7 +13,8 @@
 
 // The IQ4_NL and IQ4_XS values by 4-bit index and the IQ3_S grid by 9-bit
 // index, an entry holding the magnitudes of four consecutive elements in its
-// bytes 0..3 (llama.cpp kvalues_iq4nl and iq3s_grid).
+// bytes 0..3: llama.cpp's kvalues_iq4nl and iq3s_grid, whose MIT notice is in
+// THIRD_PARTY_NOTICES.
 QUANT_CONSTANT int8_t kIQ4NLValues[16] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
 QUANT_CONSTANT uint32_t kIQ3SGrid[512] = {
     0x01010101, 0x01010103, 0x01010105, 0x0101010b, 0x0101010f, 0x01010301, 0x01010303, 0x01010305,
