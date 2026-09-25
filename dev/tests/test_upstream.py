@@ -886,7 +886,7 @@ class UpstreamTest(unittest.TestCase):
             for name, entry in record["files"].items()
             if not name.startswith("draft/")
         }
-        packed_repo = "incoai-internal/Splash-DFlash2"
+        packed_repo = "company/Splash-DFlash2"
         packed = hub.snapshot(packed_repo, "c" * 40)
         packed.mkdir(parents=True)
         for name in ("config.json", "model.bin", "layer-0.bin"):
