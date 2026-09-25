@@ -499,6 +499,8 @@ $(TEST_ATTENTION_SWEEP): dev/benchmarks/attention_sweep.mm \
 		$(ENGINE_LIBRARY) \
 		$(ENGINE_LINKFLAGS) -o $@
 
+# The GGUF benchmarks call the operators directly; test-engine-cpu builds them
+# so they cannot fall behind unnoticed.
 $(TEST_GGUF_PROJECTION_BENCHMARK): dev/benchmarks/gguf_projection_benchmark.mm \
 		$(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
 	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< \
@@ -532,7 +534,8 @@ verify-build-identity: $(TARGET) $(BUILD_ID_HEADER) $(BUILD_ID_STAMP)
 METAL_TEST_ENV := MTL_SHADER_VALIDATION=1
 test-engine: test-engine-cpu test-engine-metal
 
-test-engine-cpu: $(TEST_CPU_TARGETS) $(TEST_ATTENTION_SWEEP) $(TUNE_KERNELS)
+test-engine-cpu: $(TEST_CPU_TARGETS) $(TEST_ATTENTION_SWEEP) $(TUNE_KERNELS) \
+		$(TEST_GGUF_PROJECTION_BENCHMARK) $(TEST_GGUF_MOE_BENCHMARK)
 	$(TEST_DEVICE_QUERIES)
 	$(TEST_TUNING_WORKLOADS)
 	$(TEST_LINEAR_PLAN) --cpu
