@@ -247,9 +247,11 @@ def normalize_messages(messages, *, vision, deadline=None):
                 if not isinstance(function, dict):
                     raise APIError(400, "invalid assistant tool call")
                 arguments = function.get("arguments", {})
+                unfinished = False
                 if isinstance(arguments, str):
                     try:
-                        arguments = json_codec.loads(arguments)
+                        # Some providers send a call without arguments as "".
+                        arguments = json_codec.loads(arguments.strip() or "{}")
                     except ValueError as error:
                         # Preserve calls truncated by the output limit in history
                         # so the conversation can continue. Invalid complete JSON
@@ -258,7 +260,8 @@ def normalize_messages(messages, *, vision, deadline=None):
                             raise APIError(
                                 400, "tool call arguments must be valid JSON"
                             ) from error
-                if not isinstance(arguments, (dict, str)) or not isinstance(
+                        unfinished = True
+                if not (isinstance(arguments, dict) or unfinished) or not isinstance(
                     function.get("name"), str
                 ):
                     raise APIError(400, "invalid assistant tool call")

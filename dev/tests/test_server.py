@@ -8450,26 +8450,32 @@ class MessageNormalizationTest(unittest.TestCase):
         call = messages[1]["tool_calls"][0]["function"]
         self.assertEqual(call["name"], "shell")
         self.assertEqual(call["arguments"], truncated)
-        complete = api_shapes.normalize_messages(
-            [
-                {"role": "user", "content": "x"},
-                {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
+        # Some providers send a call without arguments as "".
+        for arguments, expected in (('{"a": 1}', {"a": 1}), ("", {}), (" \n", {})):
+            with self.subTest(arguments=arguments):
+                complete = api_shapes.normalize_messages(
+                    [
+                        {"role": "user", "content": "x"},
                         {
-                            "type": "function",
-                            "function": {"name": "shell", "arguments": '{"a": 1}'},
-                        }
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "shell",
+                                        "arguments": arguments,
+                                    },
+                                }
+                            ],
+                        },
                     ],
-                },
-            ],
-            vision=True,
-        )
-        self.assertEqual(
-            complete[1]["tool_calls"][0]["function"]["arguments"], {"a": 1}
-        )
-        for malformed in ('{"x": 1,}', '{"x": NaN}', "not json"):
+                    vision=True,
+                )
+                self.assertEqual(
+                    complete[1]["tool_calls"][0]["function"]["arguments"], expected
+                )
+        for malformed in ('{"x": 1,}', '{"x": NaN}', "not json", '"abc"', "[1]", "5"):
             with self.subTest(arguments=malformed), self.assertRaises(api.APIError):
                 api_shapes.normalize_messages(
                     [
