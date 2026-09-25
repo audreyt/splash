@@ -104,6 +104,23 @@ class MakefileTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("for candidate in python3; do", result.stdout)
 
+    def test_language_only_is_one_or_zero(self):
+        for value, text_only in (("", False), ("0", False), ("1", True)):
+            with self.subTest(value=value):
+                result = self.make(
+                    "-n", "_install", "MODEL=owner/repo", f"LANGUAGE_ONLY={value}"
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                prepare = next(
+                    line
+                    for line in result.stdout.splitlines()
+                    if "install/models.py" in line
+                )
+                self.assertEqual("--language-only" in prepare, text_only)
+        result = self.make("model-selection", "MODEL=owner/repo", "LANGUAGE_ONLY=yes")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("LANGUAGE_ONLY is 1 (text only) or 0", result.stderr)
+
     def test_architecture_check_parses_with_the_environments_python(self):
         with tempfile.TemporaryDirectory() as directory:
             environment = Path(directory) / "venv"
