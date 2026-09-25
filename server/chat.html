@@ -261,6 +261,13 @@
     return title.length > 34 ? `${title.slice(0, 34)}…` : title;
   }
 
+  // crypto.randomUUID exists only in secure contexts, which excludes a LAN
+  // address over plain HTTP; getRandomValues works everywhere.
+  function chatId() {
+    return Array.from(crypto.getRandomValues(new Uint8Array(16)),
+      byte => byte.toString(16).padStart(2, '0')).join('');
+  }
+
   function userParts(content) {
     if (typeof content === 'string') return {text: content, images: []};
     return {
@@ -380,7 +387,7 @@
   function persist(firstPrompt) {
     let conversation = conversations.find(item => item.id === activeId);
     if (!conversation) {
-      conversation = {id: crypto.randomUUID(), title: titleFor(firstPrompt), messages, updated: Date.now()};
+      conversation = {id: chatId(), title: titleFor(firstPrompt), messages, updated: Date.now()};
       conversations.push(conversation);
       activeId = conversation.id;
     }

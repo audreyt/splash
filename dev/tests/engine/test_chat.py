@@ -33,7 +33,8 @@ class Element {
   querySelector() { return new Element(); }
 }
 
-function createChat(storage = new Map(), writable = true, models = null) {
+function createChat(storage = new Map(), writable = true, models = null,
+                    crypto = require('node:crypto').webcrypto) {
   const elements = {};
   const requests = [];
   const modelRequests = [];
@@ -62,7 +63,7 @@ function createChat(storage = new Map(), writable = true, models = null) {
       },
     },
     scrollTo() {}, AbortController, TextDecoder, Uint8Array, console, FileReader,
-    crypto: require('node:crypto').webcrypto,
+    crypto,
     fetch(url, options) {
       if (url === '/v1/models') {
         modelRequests.push(options.headers);
@@ -214,6 +215,29 @@ for (const writable of [true, false]) {
   assert.equal(chat.requests[0].body.messages[0].content, 'remembered message');
   assert.equal(storage.get('splash-thinking-effort'), 'low');
 }
+""")
+
+    def test_saves_chats_without_crypto_random_uuid(self):
+        # Browsers omit crypto.randomUUID outside secure contexts, such as a
+        # LAN address over plain HTTP (#142).
+        self.run_chat(r"""
+(async () => {
+  const {webcrypto} = require('node:crypto');
+  const storage = new Map();
+  const chat = createChat(storage, true, null,
+    {getRandomValues: array => webcrypto.getRandomValues(array)});
+  for (const prompt of ['first chat', 'second chat']) {
+    setText(chat, prompt);
+    submit(chat);
+    succeed(chat.requests.at(-1));
+    await flush();
+    chat.elements['new-chat'].handlers.click();
+  }
+  const saved = JSON.parse(storage.get('splash-chats'));
+  assert.deepEqual(saved.map(item => item.title).sort(), ['first chat', 'second chat']);
+  assert.equal(new Set(saved.map(item => item.id)).size, 2);
+  for (const {id} of saved) assert.match(id, /^[0-9a-f]{32}$/);
+})().catch(error => { console.error(error); process.exitCode = 1; });
 """)
 
     def test_enter_preserves_composition_and_shift_but_sends_normal_input(self):
