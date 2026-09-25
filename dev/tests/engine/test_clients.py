@@ -1122,6 +1122,7 @@ class InstalledCodexTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
+            (work / "codex").mkdir()
             (work / "state").mkdir()
             (work / "logs").mkdir()
             subprocess.run(["git", "init", "-q", str(work)], check=True)
@@ -1135,10 +1136,11 @@ class InstalledCodexTests(unittest.TestCase):
             base_url = f"http://127.0.0.1:{server.server_port}"
             env = {
                 key: os.environ[key]
-                for key in ("PATH", "HOME", "CODEX_HOME", "TMPDIR")
+                for key in ("PATH", "HOME", "TMPDIR")
                 if key in os.environ
             }
             env.update(
+                CODEX_HOME=str(work / "codex"),
                 HTTP_PROXY=base_url,
                 HTTPS_PROXY=base_url,
                 ALL_PROXY=base_url,
