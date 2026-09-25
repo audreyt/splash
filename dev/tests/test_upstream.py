@@ -613,14 +613,11 @@ class UpstreamTest(unittest.TestCase):
     def test_an_installation_of_another_draft_repository_moves_to_the_familys(self):
         fake = fake_hub(self, self.cache)
         chosen = selection(self.root)
-        splash = dataclasses.replace(
-            DENSE,
-            draft=dataclasses.replace(
-                DENSE.draft, repo="incoai-internal/Splash-DFlash2"
-            ),
+        other = dataclasses.replace(
+            DENSE, draft=dataclasses.replace(DENSE.draft, repo="someone/other-draft")
         )
-        fake.publish(splash.draft.repo, "c" * 40, lambda p: draft_dir(p, DENSE))
-        with mock.patch.object(families, "FAMILIES", (splash, MOE)):
+        fake.publish(other.draft.repo, "c" * 40, lambda p: draft_dir(p, DENSE))
+        with mock.patch.object(families, "FAMILIES", (other, MOE)):
             self.prepare(chosen)
         fake.requests.clear()
         output, _ = self.prepare(chosen)

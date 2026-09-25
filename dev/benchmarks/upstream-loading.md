@@ -21,7 +21,7 @@ below with `make all build/engine-tests/<tool>`.
 
 Drafts are prepared from each family's DFlash2 repository (`families.FAMILIES`);
 the ones measured here were `incoai/Qwen3.8-27B-DFlash2` at `015e7956` and
-`incoai-internal/Qwen3.6-35B-A3B-DFlash2` at `d0d865a7`. The prepared files are
+`incoai/Qwen3.6-35B-A3B-DFlash2` at `51ef7b69`. The prepared files are
 byte-identical to the drafts of the released Qwen3.8-27B and Qwen3.6-35B-A3B
 packages.
 

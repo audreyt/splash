@@ -78,8 +78,6 @@ jobs:
           - splash-m5-max-64plus
     runs-on: [self-hosted, macOS, ARM64, "${{ matrix.runner_label }}"]
     env:
-      # For the private draft repository.
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
       PYTHON_CANDIDATES: python3
       EXPECT_OUTPUT_CHANGE: ${{ inputs.expect_output_change && '1' || '' }}
     # Older Apple GPUs can spend substantially longer in the real context and

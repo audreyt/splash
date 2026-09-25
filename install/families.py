@@ -64,7 +64,7 @@ FAMILIES = (
             ("num_experts", 256),
             ("num_experts_per_tok", 8),
         ),
-        Draft("incoai-internal/Qwen3.6-35B-A3B-DFlash2", 6),
+        Draft("incoai/Qwen3.6-35B-A3B-DFlash2", 6),
     ),
 )
 
