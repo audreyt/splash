@@ -727,8 +727,9 @@ def normalize_tools(tools, tool_choice, parallel, namespaces=None):
             raise APIError(400, "tool_choice requires at least one tool")
         return None, None
     if choice == "none":
-        return None, None
-    if isinstance(choice, dict):
+        # The prompt keeps every tool; the grammar and validators allow no call.
+        validators, schemas = {}, {}
+    elif isinstance(choice, dict):
         function = choice.get("function", {})
         name = function.get("name") if isinstance(function, dict) else None
         if (
@@ -779,7 +780,11 @@ def tool_grammar(policy, thinking, response_schema=None):
         "(" + " | ".join(f"tool_{index}" for index in range(len(tag_rules))) + ")"
     )
     thinking_prefix = "think " if thinking else ""
-    if response_schema is not None:
+    if not tag_rules:
+        # tool_choice "none": neither the text nor a JSON answer starts a call.
+        body = "tail" if response_schema is None else "answer"
+        start = f"start: {thinking_prefix}{body}"
+    elif response_schema is not None:
         calls = tool_choice + ("+" if policy.parallel else "") + " WS"
         body = calls if policy.required else f"({calls} | answer)"
         start = f"start: {thinking_prefix}{body}"

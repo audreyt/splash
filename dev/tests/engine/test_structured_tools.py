@@ -119,6 +119,26 @@ class StructuredToolGrammarTest(unittest.TestCase):
             OTHER_CALL, choice={"type": "function", "function": {"name": "lookup"}}
         )
 
+    def test_none_keeps_the_tools_but_lets_no_call_start(self):
+        # The prompt renders the tools as for any choice; only output changes.
+        tools, none = tool_schema.normalize_tools(TOOLS, "none", True)
+        self.assertEqual((tools, none.schemas, none.required), (TOOLS, {}, False))
+        self.assert_complete(ANSWER, choice="none")
+        for text in (CALL, ANSWER + CALL, "plain answer"):
+            with self.subTest(text=text):
+                self.assert_not_complete(text, choice="none")
+        grammar = tool_schema.tool_grammar(none, False)
+        for text, complete in (("plain answer", True), ("see " + CALL, False)):
+            with self.subTest(text=text):
+                matcher = LLMatcher(self.guidance, grammar)
+                tokens = self.tokenizer.encode(text).ids
+                accepted = (
+                    matcher.validate_tokens(tokens) == len(tokens)
+                    and matcher.consume_tokens(tokens)
+                    and matcher.is_accepting()
+                )
+                self.assertEqual(accepted, complete)
+
     def test_parallel_false_excludes_a_second_call(self):
         for choice in ("auto", "required"):
             with self.subTest(choice=choice):

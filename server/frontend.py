@@ -887,7 +887,11 @@ class Frontend:
             prompt.response_schema,
             prompt.response_validator,
         )
-        if stop_sequences and (tools or response_schema is not None):
+        # A stop sequence could cut a tool call or a structured result short;
+        # under tool_choice none the tools are only described, never called.
+        if stop_sequences and (
+            (tools and tool_policy.schemas) or response_schema is not None
+        ):
             raise APIError(
                 400, "stop cannot be combined with tools or structured output"
             )

@@ -5133,10 +5133,9 @@ class ServerTest(unittest.TestCase):
             {"type": "function", "function": {"name": "f"}},
             {"type": "function", "function": {"name": "g"}},
         ]
-        app.prepare(self.body(tools=tools, tool_choice="none"))
-        self.assertNotIn("tools", tokenizer.templates[-1][1])
         named = {"type": "function", "function": {"name": "g"}}
         cases = (
+            ({"tool_choice": "none"}, False, True, "tail"),
             ({"tool_choice": "required"}, True, True, "(tool_0 | tool_1)+"),
             ({"tool_choice": named}, True, True, "(tool_0)+"),
             ({"parallel_tool_calls": False}, False, False, "(tool_0 | tool_1)? tail"),
@@ -5161,6 +5160,23 @@ class ServerTest(unittest.TestCase):
                     ],
                     list(policy.schemas),
                 )
+
+    def test_stop_is_refused_only_while_a_tool_can_be_called(self):
+        tokenizer = FakeTokenizer()
+        backend = backend_api.NativeBackend(FakeRuntime(), tokenizer)
+        self.addCleanup(backend.close)
+        app = make_frontend(
+            tokenizer, backend, "test-model", 128, 16, 1, 2, vision=True
+        )
+        tools = [{"type": "function", "function": {"name": "f"}}]
+        job, _, _ = app.prepare(self.body(tools=tools, tool_choice="none", stop=["x"]))
+        self.assertEqual(job.tool_policy.schemas, {})
+        for choice in ("auto", "required"):
+            with (
+                self.subTest(tool_choice=choice),
+                self.assertRaisesRegex(api.APIError, "stop cannot be combined"),
+            ):
+                app.prepare(self.body(tools=tools, tool_choice=choice, stop=["x"]))
 
     def test_tool_names_accept_long_mcp_names_up_to_128_characters(self):
         runtime = FakeRuntime(Plan([[4]]))
