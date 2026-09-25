@@ -12,10 +12,12 @@
 #include <cstdint>
 #include <filesystem>
 #include <array>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 namespace splash::model {
@@ -179,9 +181,23 @@ struct DFlashDraftWeights final {
 
 inline constexpr std::string_view kDFlashLayerMagic = "MDFD0004";
 
+// A Splash package's draft files: layer-<N>.bin and model.bin.
+struct PackedDraftFiles final {
+  metal::MetalBackend &backend;
+  std::filesystem::path directory;
+  const DFlashDraftLayout &layout;
+  [[nodiscard]] WeightFile layer(uint32_t index) const;
+  [[nodiscard]] WeightFile model() const;
+};
+
+class DraftCheckpointLoader;
+
+// The files a draft is read from: a package's packed files, or the cached
+// files DraftCheckpointLoader prepares from a DFlash2 checkpoint.
+using DraftFiles = std::variant<PackedDraftFiles, std::reference_wrapper<DraftCheckpointLoader>>;
+
 [[nodiscard]] DFlashDraftWeights
-loadDFlashDraftWeights(metal::MetalBackend &backend,
-                       const std::filesystem::path &directory,
+loadDFlashDraftWeights(metal::MetalBackend &backend, const DraftFiles &files,
                        DFlashDraftLayout layout = {});
 
 // Builds the draft layer graph from packed buffers and persistent context.

@@ -47,21 +47,18 @@ def mlx_target(root, family, *, changes=None):
 
 
 def draft_dir(root, family):
-    """The drafts' repository layout: family's folder of DFlash2 files."""
-    folder = root / family.name
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "config.json").write_text(
+    """A DFlash2 release of family's draft: its configuration and weights."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "config.json").write_text(
         json.dumps(
             {
                 "architectures": ["DFlash2DraftModel"],
                 "hidden_size": dict(family.signature)["hidden_size"],
                 "num_hidden_layers": family.draft.layers,
-                "splash": {"format": models.DRAFT_LAYER_MAGIC},
             }
         )
     )
-    for name in ("model.bin", *(f"layer-{i}.bin" for i in range(family.draft.layers))):
-        (folder / name).write_bytes(b"draft")
+    (root / "model.safetensors").write_bytes(b"draft")
     return root
 
 
@@ -183,7 +180,7 @@ def fake_hub(test, cache, *, target=DENSE, commit="a" * 40):
     fake.publish(MODEL, commit, lambda p: mlx_target(p, target))
     for family in families.FAMILIES:
         fake.publish(
-            families.DRAFTS, family.draft.revision, lambda p: draft_dir(p, family)
+            family.draft.repo, family.draft.revision, lambda p: draft_dir(p, family)
         )
     return fake
 

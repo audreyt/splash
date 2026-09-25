@@ -17,8 +17,9 @@ there is nothing to configure.
 ## Quick start
 
 Apple M3 or newer, macOS 26.4 or later, [Homebrew](https://brew.sh), 36 GB
-of unified memory (48 GB or more recommended), and free disk for the model and
-a prepared copy of its weights (about 35 GB in total for Qwen3.8-27B).
+of unified memory (48 GB or more recommended), and free disk for the model,
+its draft and a prepared copy of their weights (up to about 40 GB in total for
+Qwen3.8-27B and 48 GB for Qwen3.6-35B-A3B).
 
 ```bash
 brew install incoai/tap/splash
@@ -76,8 +77,8 @@ group-64 checkpoint (such as the mlx-community `-4bit` conversions) or a GGUF,
 selected with `OWNER/REPO:VARIANT` (for example `:UD-Q4_K_M`). Splash
 identifies the model from its own metadata, its architecture and dimensions,
 before downloading any weights, and pairs the DFlash2 draft trained for it;
-`--draft-model` replaces that draft with another repository of the same layout
-or a local draft directory. The tokenizer, configuration and chat template come
+`--draft-model` replaces that draft with another DFlash2 checkpoint, a
+repository or a local directory. The tokenizer, configuration and chat template come
 from the target repository for MLX and from the selected GGUF file itself for
 GGUF, never from another repository: unsupported or incomplete tokenizer
 metadata is an error. GGUF variants whose tensor types Splash cannot load are

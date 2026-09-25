@@ -1,10 +1,12 @@
-// Prepares a tiny dense or MoE affine checkpoint twice (cold, then warm
-// without conversion headroom) and prints each prepared image's SHA-256.
-// Every image must also equal the independently serialized file in
-// FIXTURE/expected.
+// Prepares a tiny dense or MoE affine checkpoint, or a DFlash2 draft
+// checkpoint, twice (cold, then warm without conversion headroom) and prints
+// each prepared image's SHA-256. Every image must also equal the
+// independently serialized file in FIXTURE/expected.
 //
-//   affine-preparation METALLIB FIXTURE dense|moe
+//   affine-preparation METALLIB FIXTURE dense|moe|draft
 #include "model/AffineTarget.hpp"
+#include "model/DFlashDraft.hpp"
+#include "model/DraftCheckpoint.hpp"
 #include "model/Qwen3_6Moe.hpp"
 #include "model/Qwen3_8.hpp"
 #include "model/QwenTargetLoader.hpp"
@@ -46,13 +48,15 @@ template <class Layout> Layout tinyLayout() {
   return layout;
 }
 
-template <class Layout>
-void prepare(metal::MetalBackend &backend, const std::filesystem::path &root, const Layout &layout) {
+// Prepares the fixture at root with Loader twice; open opens every file of
+// the loader, in the order it plans them, through check.
+template <class Loader, class Layout, class Open>
+void prepare(metal::MetalBackend &backend, const std::filesystem::path &root, const Layout &layout, Open open) {
   const std::filesystem::path cache(std::getenv("SPLASH_WEIGHT_CACHE"));
   bool cold = true;
   const auto admitConversion = [&] { if (!cold) throw std::runtime_error("conversion forbidden on warm load"); };
   for (unsigned pass = 0; pass < 2; ++pass) {
-    model::AffineTargetLoader loader(backend, root, layout, admitConversion);
+    Loader loader(backend, root, layout, admitConversion);
     size_t opened = 0;
     const auto check = [&](model::WeightFile weights) {
       const auto &record = weights.record();
@@ -72,13 +76,34 @@ void prepare(metal::MetalBackend &backend, const std::filesystem::path &root, co
       weights.finish();
       if (pass == 0) std::cout << "prepared " << record.relativePath << ' ' << model::weightDigest(prepared) << '\n';
     };
-    check(loader.layer(0));
-    check(loader.layer(1));
-    check(loader.head());
-    check(loader.embedding());
+    open(loader, check);
     if (opened != loader.weights().size()) throw std::runtime_error("the loader plans files it never writes");
     cold = false;
   }
+}
+
+// Every image of the target fixtures, in plan order.
+void openTarget(model::AffineTargetLoader &loader, const auto &check) {
+  check(loader.layer(0));
+  check(loader.layer(1));
+  check(loader.head());
+  check(loader.embedding());
+}
+
+// The draft fixture: two layers of width 256, one KV head.
+model::DFlashDraftLayout tinyDraftLayout() {
+  model::DFlashDraftLayout layout;
+  layout.layers = 2;
+  layout.hiddenSize = 256;
+  layout.vocabularySize = 256;
+  layout.dynamicSize = 256;
+  layout.qkvSize = 256;
+  layout.attentionSize = 128;
+  layout.intermediateSize = 256;
+  layout.attentionHeadDimension = 64;
+  layout.targetHiddenSize = 256;
+  layout.kvHeads = 1;
+  return layout;
 }
 
 } // namespace
@@ -86,24 +111,55 @@ void prepare(metal::MetalBackend &backend, const std::filesystem::path &root, co
 int main(int argc, char **argv) {
   @autoreleasepool {
     try {
-      if (argc != 4 || (std::string_view(argv[3]) != "dense" && std::string_view(argv[3]) != "moe"))
-        throw std::runtime_error("usage: affine-preparation METALLIB FIXTURE dense|moe");
+      const std::string_view kind = argc == 4 ? argv[3] : "";
+      if (kind != "dense" && kind != "moe" && kind != "draft")
+        throw std::runtime_error("usage: affine-preparation METALLIB FIXTURE dense|moe|draft");
       const std::filesystem::path root(argv[2]);
       setenv("SPLASH_WEIGHT_CACHE", (root / "cache").c_str(), 1);
       metal::MetalBackend backend(argv[1]);
-      if (std::string_view(argv[3]) == "moe") {
+      if (kind == "draft") {
+        const model::DFlashDraftLayout layout = tinyDraftLayout();
+        prepare<model::DraftCheckpointLoader>(backend, root, layout, [](auto &loader, const auto &check) {
+          check(loader.layer(0));
+          check(loader.layer(1));
+          check(loader.model());
+        });
+        // The draft reads the prepared files as it reads a package's.
+        model::DraftCheckpointLoader files(backend, root, layout);
+        const model::DFlashDraftWeights draft = model::loadDFlashDraftWeights(backend, std::ref(files), layout);
+        const auto affine = [](const ops::Projection &p, uint32_t n, uint32_t k) {
+          return p.layout() == ops::WeightLayout::Affine64 && p.outputSize == n && p.inputSize == k;
+        };
+        bool read = draft.layers.size() == layout.layers && draft.files.size() == layout.layers + 1 &&
+                    affine(draft.contextProjection, layout.hiddenSize, layout.targetHiddenSize) &&
+                    affine(draft.selectorProjection, layout.selectorRank, layout.hiddenSize);
+        for (const auto &layer : draft.layers)
+          read = read && affine(layer.attentionDynamic, layout.dynamicSize, layout.hiddenSize) &&
+                 affine(layer.qkvProjection, layout.qkvSize, layout.hiddenSize) &&
+                 affine(layer.outputProjection, layout.hiddenSize, layout.attentionSize) &&
+                 affine(layer.downProjection, layout.hiddenSize, layout.intermediateSize);
+        if (!read) throw std::runtime_error("the draft loader misread the prepared draft files");
+        std::cout << "affine preparation: exact independent draft fixture, quantization edge cases, fused qkv, "
+                     "warm admission, planned weights, draft read PASS\n";
+        return 0;
+      }
+      if (kind == "moe") {
         auto layout = tinyLayout<model::Qwen3_6MoeLayout>();
         layout.experts = 256;
         layout.expertsPerToken = 8;
         layout.expertIntermediateSize = 256;
-        prepare(backend, root, layout);
+        prepare<model::AffineTargetLoader>(backend, root, layout, [](auto &loader, const auto &check) {
+          openTarget(loader, check);
+        });
         std::cout << "affine preparation: exact independent fixture, MoE experts, 8-bit router and shared-expert "
                      "gate, warm admission, planned weights PASS\n";
         return 0;
       }
       auto layout = tinyLayout<model::Qwen3_8Layout>();
       layout.intermediateSize = 512;
-      prepare(backend, root, layout);
+      prepare<model::AffineTargetLoader>(backend, root, layout, [](auto &loader, const auto &check) {
+        openTarget(loader, check);
+      });
       // The target loader reads the prepared files as affine Q4 projections of
       // the layout's sizes with bf16 norms.
       model::AffineTargetLoader files(backend, root, layout);

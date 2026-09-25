@@ -247,6 +247,7 @@ ENGINE_CPP_SOURCES := \
 	runtime/model/GgufTarget.cpp \
 	runtime/model/AffineTarget.cpp \
 	runtime/model/AffinePreparation.cpp \
+	runtime/model/DraftCheckpoint.cpp \
 	runtime/model/PreparedWeights.cpp \
 	runtime/model/GgufPreparation.cpp \
 	runtime/model/Qwen3_6Moe.cpp \

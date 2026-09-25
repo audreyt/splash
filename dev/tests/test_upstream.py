@@ -285,7 +285,7 @@ class UpstreamTest(unittest.TestCase):
         fake.publish(
             "someone/my-favourite-model", "a" * 40, lambda p: mlx_target(p, MOE)
         )
-        fake.publish(families.DRAFTS, MOE.draft.revision, lambda p: draft_dir(p, MOE))
+        fake.publish(MOE.draft.repo, MOE.draft.revision, lambda p: draft_dir(p, MOE))
         # The name says nothing about the model; the configuration does.
         chosen = selection(self.root, "someone/my-favourite-model")
         self.prepare(chosen)
@@ -293,7 +293,7 @@ class UpstreamTest(unittest.TestCase):
             fake.requests,
             [
                 ("someone/my-favourite-model", None),
-                (families.DRAFTS, MOE.draft.revision),
+                (MOE.draft.repo, MOE.draft.revision),
             ],
         )
         record = assembly.verify(chosen.link)
@@ -302,7 +302,7 @@ class UpstreamTest(unittest.TestCase):
             record["sources"],
             {
                 "target": {"repo": chosen.model, "revision": "a" * 40},
-                "draft": {"repo": families.DRAFTS, "revision": MOE.draft.revision},
+                "draft": {"repo": MOE.draft.repo, "revision": MOE.draft.revision},
             },
         )
         self.assertEqual(record["vision_format"], "none")
@@ -316,7 +316,9 @@ class UpstreamTest(unittest.TestCase):
         # The paths the native loaders and the tokenizer read (assembly.py).
         for name in ("config.json", "target/config.json", "tokenizer/config.json"):
             self.assertEqual((chosen.link / name).readlink(), snapshot / "config.json")
-        self.assertEqual((chosen.link / "draft/model.bin").read_bytes(), b"draft")
+        self.assertEqual(
+            (chosen.link / "draft/model.safetensors").read_bytes(), b"draft"
+        )
         (snapshot / "tokenizer.json").write_text("changed size")
         with self.assertRaises(models.ModelError):
             assembly.verify(chosen.link)
@@ -459,7 +461,7 @@ class UpstreamTest(unittest.TestCase):
             assembly.verify(chosen.link)["sources"]["target"]["revision"], "b" * 40
         )
         self.assertEqual(fake.requests, [(MODEL, None)])
-        self.assertNotIn(f"{families.DRAFTS}/{DENSE.name}/model.bin", fake.downloads)
+        self.assertNotIn(f"{DENSE.draft.repo}/model.safetensors", fake.downloads)
         self.assertEqual(pins(self.cache), sorted(["b" * 40, DENSE.draft.revision]))
 
     def test_publishing_removes_what_no_installation_uses(self):
@@ -583,9 +585,9 @@ class UpstreamTest(unittest.TestCase):
         chosen = selection(self.root)
         self.prepare(chosen)
         moved = dataclasses.replace(
-            DENSE, draft=families.Draft("e" * 40, DENSE.draft.layers)
+            DENSE, draft=dataclasses.replace(DENSE.draft, revision="e" * 40)
         )
-        fake.publish(families.DRAFTS, "e" * 40, lambda p: draft_dir(p, DENSE))
+        fake.publish(DENSE.draft.repo, "e" * 40, lambda p: draft_dir(p, DENSE))
         fake.requests.clear(), fake.downloads.clear()
         with mock.patch.object(families, "FAMILIES", (moved, MOE)):
             output, _ = self.prepare(chosen)
@@ -594,13 +596,13 @@ class UpstreamTest(unittest.TestCase):
             assembly.verify(chosen.link)["sources"],
             {
                 "target": {"repo": MODEL, "revision": "a" * 40},
-                "draft": {"repo": families.DRAFTS, "revision": "e" * 40},
+                "draft": {"repo": DENSE.draft.repo, "revision": "e" * 40},
             },
         )
         # Only the new draft is fetched; the target is not downloaded again.
-        self.assertEqual(fake.requests, [(MODEL, None), (families.DRAFTS, "e" * 40)])
+        self.assertEqual(fake.requests, [(MODEL, None), (DENSE.draft.repo, "e" * 40)])
         self.assertTrue(
-            all(name.startswith(families.DRAFTS) for name in fake.downloads)
+            all(name.startswith(DENSE.draft.repo + "/") for name in fake.downloads)
         )
         self.assertEqual(pins(self.cache), sorted(["a" * 40, "e" * 40]))
 
@@ -609,14 +611,14 @@ class UpstreamTest(unittest.TestCase):
         chosen = selection(self.root)
         self.prepare(chosen)
         unpublished = dataclasses.replace(
-            DENSE, draft=families.Draft("f" * 40, DENSE.draft.layers)
+            DENSE, draft=dataclasses.replace(DENSE.draft, revision="f" * 40)
         )
         fake.downloads.clear()
         with mock.patch.object(families, "FAMILIES", (unpublished, MOE)):
             _, warnings = self.prepare(chosen)
         self.assertIn(
             f"Warning: cannot fetch the {DENSE.name} draft {'f' * 12}; keeping the "
-            f"installed one: cannot resolve {families.DRAFTS}: 404 Client Error",
+            f"installed one: cannot resolve {DENSE.draft.repo}: 404 Client Error",
             warnings,
         )
         self.assertEqual(
@@ -633,7 +635,7 @@ class UpstreamTest(unittest.TestCase):
         chosen = selection(self.root)
         self.prepare(chosen)
         fake.publish(MODEL, "b" * 40, lambda p: mlx_target(p, DENSE))
-        fake.publish(families.DRAFTS, "e" * 40, build_draft)
+        fake.publish(DENSE.draft.repo, "e" * 40, build_draft)
         fetch = fake.fetch
 
         def fetch_or_fail(repo_id, name, revision):
@@ -642,7 +644,7 @@ class UpstreamTest(unittest.TestCase):
             return fetch(repo_id, name, revision)
 
         repinned = dataclasses.replace(
-            DENSE, draft=families.Draft("e" * 40, DENSE.draft.layers)
+            DENSE, draft=dataclasses.replace(DENSE.draft, revision="e" * 40)
         )
         with (
             mock.patch.object(families, "FAMILIES", (repinned, MOE)),
@@ -654,7 +656,7 @@ class UpstreamTest(unittest.TestCase):
             assembly.verify(chosen.link)["sources"],
             {
                 "target": {"repo": MODEL, "revision": "b" * 40},
-                "draft": {"repo": families.DRAFTS, "revision": DENSE.draft.revision},
+                "draft": {"repo": DENSE.draft.repo, "revision": DENSE.draft.revision},
             },
         )
         self.assertEqual(pins(self.cache), sorted(["b" * 40, DENSE.draft.revision]))
@@ -671,16 +673,16 @@ class UpstreamTest(unittest.TestCase):
             warnings,
         )
 
-    def test_a_new_draft_missing_a_layer_keeps_the_installed_draft(self):
+    def test_a_new_draft_without_weights_keeps_the_installed_draft(self):
         def incomplete(root):
             draft_dir(root, DENSE)
-            (root / DENSE.name / "layer-0.bin").unlink()
+            (root / "model.safetensors").unlink()
 
         warnings = self.move_target_and_pin_a_new_draft(incomplete)
         self.assertIn(
             f"Warning: cannot fetch the {DENSE.name} draft {'e' * 12}; keeping the "
-            f"installed one: {families.DRAFTS} does not contain the Splash DFlash2 "
-            f"draft for {DENSE.name}",
+            f"installed one: {DENSE.draft.repo} does not contain a DFlash2 "
+            f"checkpoint for {DENSE.name}",
             warnings,
         )
 
@@ -744,9 +746,9 @@ class UpstreamTest(unittest.TestCase):
         installed = chosen.link.resolve()
         moved = self.root / "moved"
         moved.mkdir()
-        fake.publish(families.DRAFTS, "e" * 40, lambda p: draft_dir(p, DENSE))
+        fake.publish(DENSE.draft.repo, "e" * 40, lambda p: draft_dir(p, DENSE))
         repinned = dataclasses.replace(
-            DENSE, draft=families.Draft("e" * 40, DENSE.draft.layers)
+            DENSE, draft=dataclasses.replace(DENSE.draft, revision="e" * 40)
         )
         fake.downloads.clear()
         with (
@@ -766,9 +768,10 @@ class UpstreamTest(unittest.TestCase):
 
     def test_an_incompatible_draft_is_an_error_not_a_crash(self):
         fake_hub(self, self.cache)
-        local = draft_dir(self.root / "draft", DENSE) / DENSE.name
+        local = draft_dir(self.root / "draft", DENSE)
         config = json.loads((local / "config.json").read_text())
-        (local / "config.json").write_text(json.dumps(config | {"splash": "MDFD0004"}))
+        layers = {"num_hidden_layers": DENSE.draft.layers + 1}
+        (local / "config.json").write_text(json.dumps(config | layers))
         with self.assertRaisesRegex(models.ModelError, "draft configuration"):
             self.prepare(selection(self.root, draft_model=str(local)))
 
@@ -785,9 +788,9 @@ class UpstreamTest(unittest.TestCase):
             )
             self.assertEqual([ref.name for ref in refs], [commit])
             draft_refs = sorted(
-                (
-                    self.cache / "models--incoai-internal--Splash-DFlash2/refs/splash"
-                ).glob("*/*")
+                (self.cache / hub.folder_name(DENSE.draft.repo) / "refs/splash").glob(
+                    "*/*"
+                )
             )
             self.assertEqual([ref.name for ref in draft_refs], [DENSE.draft.revision])
         self.assertEqual(refs[0].parent.name, draft_refs[0].parent.name)

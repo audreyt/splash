@@ -38,9 +38,6 @@ else:
 MODELS = paths.MODELS
 # The bound on one JSON metadata file.
 MAX_JSON_BYTES = 4 * 1024 * 1024
-# The magic that begins each DFlash2 draft layer file Splash loads, and the
-# draft configuration's splash.format.
-DRAFT_LAYER_MAGIC = "MDFD0004"
 REPO_ID = re.compile(
     r"[A-Za-z0-9_](?:[A-Za-z0-9._-]*[A-Za-z0-9_])?/"
     r"[A-Za-z0-9_](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9_])?"

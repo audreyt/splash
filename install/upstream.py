@@ -448,7 +448,7 @@ def _install(selection, repo, installed):
 
 
 def _pinned_draft(family):
-    return {"repo": families.DRAFTS, "revision": family.draft.revision}
+    return {"repo": family.draft.repo, "revision": family.draft.revision}
 
 
 def _changes(installed, selection):
@@ -497,7 +497,7 @@ def _new_draft(family, selection, recorded):
                     selection.draft_model, installation=selection.link
                 )
             else:
-                repo = hub.Repository.resolve(families.DRAFTS, family.draft.revision)
+                repo = hub.Repository.resolve(family.draft.repo, family.draft.revision)
             return repo, _draft_files(repo, family)
     except models.ModelError as error:
         if not recorded:
@@ -510,28 +510,22 @@ def _new_draft(family, selection, recorded):
 
 
 def _draft_files(repo, family):
-    """The family's draft files in repo, downloaded, by assembly path: its
-    folder of the shared repository, or, for a --draft-model directory, the
-    directory itself."""
-    folder = family.name + "/" if f"{family.name}/config.json" in repo.files else ""
-    layers = (f"layer-{i}.bin" for i in range(family.draft.layers))
-    names = {folder + name for name in ("config.json", "model.bin", *layers)}
-    if not names <= repo.files:
+    """The family's DFlash2 checkpoint in repo, downloaded, by assembly path:
+    config.json and the safetensors weights at the root of the repository or
+    --draft-model directory, as a DFlash2 release holds them."""
+    weights = {n for n in repo.files if "/" not in n and n.endswith(".safetensors")}
+    if "config.json" not in repo.files or not weights:
         raise models.ModelError(
-            f"{repo.name} does not contain the Splash DFlash2 draft for {family.name}"
+            f"{repo.name} does not contain a DFlash2 checkpoint for {family.name}"
         )
-    config = models.read_json(repo.file(folder + "config.json"))
-    splash = config.get("splash")
+    config = models.read_json(repo.file("config.json"))
     if (
         config.get("architectures") != ["DFlash2DraftModel"]
         or config.get("hidden_size") != dict(family.signature)["hidden_size"]
         or config.get("num_hidden_layers") != family.draft.layers
-        or not isinstance(splash, dict)
-        or splash.get("format") != models.DRAFT_LAYER_MAGIC
     ):
         raise models.ModelError(
             "draft configuration is incompatible with " + family.name
         )
-    return {
-        "draft/" + Path(name).name: path for name, path in repo.download(names).items()
-    }
+    downloaded = repo.download({"config.json", *weights})
+    return {"draft/" + name: path for name, path in downloaded.items()}

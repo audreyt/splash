@@ -15,6 +15,7 @@ from dev.benchmarks import prepared
 from dev.tests.installer_fixtures import (
     DENSE,
     MODEL,
+    draft_dir,
     fake_hub,
     mlx_target,
     selection,
@@ -53,13 +54,25 @@ def in_process(fake):
     return run
 
 
+def safetensors_bytes(data):
+    """A safetensors file of one U8 tensor whose data is data."""
+    header = b'{"t":{"dtype":"U8","shape":[%d],"data_offsets":[0,%d]}}' % (
+        len(data),
+        len(data),
+    )
+    return struct.pack("<Q", len(header)) + header + data
+
+
 def safetensors_target(root):
     """MODEL's files, with a shard whose tensor data is b"data"."""
     mlx_target(root, DENSE)
-    header = b'{"t":{"dtype":"U8","shape":[4],"data_offsets":[0,4]}}'
-    (root / "model.safetensors").write_bytes(
-        struct.pack("<Q", len(header)) + header + b"data"
-    )
+    (root / "model.safetensors").write_bytes(safetensors_bytes(b"data"))
+
+
+def safetensors_draft(root):
+    """DENSE's DFlash2 release, with weights whose tensor data is b"draft"."""
+    draft_dir(root, DENSE)
+    (root / "model.safetensors").write_bytes(safetensors_bytes(b"draft"))
 
 
 def gguf_bytes(data):
@@ -92,12 +105,21 @@ def prepared_entry(weights, key, component, inputs):
     return {"component": component, "sha256": digest}
 
 
-def target_components(family):
+def components(family):
+    """The prepared files of a text-only installation of family: its
+    target's and its draft's."""
     layers = dict(family.signature)["num_hidden_layers"]
     return sorted(
-        ["target/embedding.bin", "target/head.bin"]
+        ["target/embedding.bin", "target/head.bin", "draft/model.bin"]
         + [f"target/layer-{index}.bin" for index in range(layers)]
+        + [f"draft/layer-{index}.bin" for index in range(family.draft.layers)]
     )
+
+
+def source_inputs(data):
+    """The inputs a prepared entry records when it is written from one source
+    file, of tensor data data."""
+    return hashlib.sha256(hashlib.sha256(data).hexdigest().encode()).hexdigest()
 
 
 class InstallerRestartsTest(unittest.TestCase):
@@ -181,6 +203,7 @@ class InstallerRestartsTest(unittest.TestCase):
     def test_prepared_names_the_entries_of_the_installations_sources(self):
         fake = fake_hub(self, self.cache)
         fake.publish(MODEL, "a" * 40, safetensors_target)
+        fake.publish(DENSE.draft.repo, DENSE.draft.revision, safetensors_draft)
         chosen = selection(self.root)
         with (
             contextlib.redirect_stdout(io.StringIO()),
@@ -189,13 +212,15 @@ class InstallerRestartsTest(unittest.TestCase):
             upstream.prepare(chosen)
         weights = self.root / "weights"
         (weights / "verified").mkdir(parents=True)
-        inputs = hashlib.sha256(hashlib.sha256(b"data").hexdigest().encode())
 
-        def entry(key, component, inputs=inputs.hexdigest()):
-            return prepared_entry(weights, key, component, inputs)
+        def entry(key, component, inputs=None):
+            data = b"draft" if component.startswith("draft/") else b"data"
+            return prepared_entry(
+                weights, key, component, inputs or source_inputs(data)
+            )
 
-        components = target_components(DENSE)
-        expected = [entry(f"{i:064x}", name) for i, name in enumerate(components)]
+        names = components(DENSE)
+        expected = [entry(f"{i:064x}", name) for i, name in enumerate(names)]
         # Another model's preparation of a component is not this one's.
         entry("f" * 64, "target/layer-0.bin", inputs="0" * 64)
         self.assertEqual(restarts.loaded_entries(chosen.link, weights), expected)
@@ -205,7 +230,7 @@ class InstallerRestartsTest(unittest.TestCase):
         ):
             restarts.loaded_entries(chosen.link, weights)
         shutil.rmtree(weights / ("e" * 64))
-        (weights / f"{components.index('target/head.bin'):064x}" / "source").write_text(
+        (weights / f"{names.index('target/head.bin'):064x}" / "source").write_text(
             f"{prepared.PROVENANCE}\ncomponent target/head.bin\ninputs {'1' * 64}\n"
             "source /elsewhere\n"
         )
@@ -227,23 +252,31 @@ class InstallerRestartsTest(unittest.TestCase):
         blob = self.root / "hub/blobs" / ("0" * 64)
         blob.parent.mkdir(parents=True)
         blob.write_bytes(gguf_bytes(b"abcd"))
+        draft = self.root / "hub/blobs" / ("1" * 64)
+        draft.write_bytes(safetensors_bytes(b"draft"))
         link = self.root / "assembly"
         (link / "target").mkdir(parents=True)
         (link / "target/model.gguf").symlink_to(blob)
+        (link / "draft").mkdir()
+        (link / "draft/model.safetensors").symlink_to(draft)
         (link / "model.json").write_text(
             json.dumps(
                 {
                     "family": DENSE.name,
                     "vision_format": "none",
-                    "files": {"target/model.gguf": {}},
+                    "files": {"target/model.gguf": {}, "draft/model.safetensors": {}},
                 }
             )
         )
         weights = self.root / "weights"
-        inputs = hashlib.sha256(hashlib.sha256(b"abcd").hexdigest().encode())
         expected = [
-            prepared_entry(weights, f"{i:064x}", name, inputs.hexdigest())
-            for i, name in enumerate(target_components(DENSE))
+            prepared_entry(
+                weights,
+                f"{i:064x}",
+                name,
+                source_inputs(b"draft" if name.startswith("draft/") else b"abcd"),
+            )
+            for i, name in enumerate(components(DENSE))
         ]
         self.assertEqual(restarts.loaded_entries(link, weights), expected)
 

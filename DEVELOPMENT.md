@@ -191,28 +191,20 @@ HF_HUB_CACHE=/Volumes/Models/huggingface splash serve --model mlx-community/Qwen
 existing downloads are not moved. Prepared weights have their own cache,
 which this does not move ([Weight preparation](#weight-preparation)).
 
-### Draft assets
+### Drafts
 
-Splash's DFlash2 drafts share one Hub repository, `families.DRAFTS`, with a
-folder per base model named after it: `Qwen3.8-27B/` and `Qwen3.6-35B-A3B/`.
-Each folder holds `config.json`, `model.bin` and `layer-N.bin`. The
-configuration is the original DFlash2 configuration with
-`splash.format = "MDFD0004"` and `splash.source`, the DFlash2 checkpoint the
-weights came from; native loading validates it against the target. The weights
-are the verified Q4 drafts of the Splash packages, not a quantization made at
-startup. Each family pins the commit that published its folder
-(`Draft.revision` in `families.FAMILIES`), and installation downloads only that
-folder.
-
-To prepare a folder from a verified existing package:
-
-```bash
-python dev/tools/export_draft.py PACKAGE ORIGINAL_DRAFT_CONFIG DRAFTS/Qwen3.6-35B-A3B
-```
-
-The exporter verifies existing artifact hashes and copies only draft files.
-`--draft-model` accepts such a folder, a local copy of the whole repository, or
-another Hub repository with the same layout.
+Each family pins the DFlash2 checkpoint trained for it as its repository
+releases it, `config.json` and BF16 safetensors, at one commit (`Draft` in
+`families.FAMILIES`). Installation downloads only those files; `--draft-model`
+accepts another repository or a local directory that holds them. Native
+loading validates the configuration against the target and prepares the
+draft like a target ([Weight preparation](#weight-preparation)):
+`DraftCheckpointLoader` (`DraftCheckpoint.cpp`) plans the packed draft files
+of a Splash package, `layer-<N>.bin` and `model.bin`, and `AffinePreparation`
+quantizes each projection to 4 bits in groups of 64 as MLX's affine
+quantization rounds it and copies every other tensor as stored. For both
+families the prepared files are byte for byte the Q4 drafts of the Splash
+packages.
 
 ### Tokenizer and chat templates
 
@@ -299,36 +291,40 @@ launchers configure OpenCode and Hermes without attachments.
 
 ### Weight preparation
 
-Source adapters write a model's target and vision tensors into prepared files:
-an MLX target and any vision tower into the packed layouts of Splash packages,
-which run the same kernels, and a GGUF target into the `MDGG0001` layout of the
-GGUF kernels. Each adapter is a loader, which validates the source's metadata
-and plans its files, and a writer: `AffineTargetLoader` (`AffineTarget.cpp`)
-and `AffinePreparation` for an MLX target, `GgufTargetLoader`
-(`GgufTarget.cpp`, planned by `GgufImage.cpp`) and `GgufPreparation` for a GGUF
-target, `VisionLoader` and `VisionPreparation` for an MLX or GGUF vision tower.
-They open their files through `PreparedFiles`, the `PreparedWeights` cache with
-the load's guards. `AffinePreparation` reorders codes, scales and biases into
-256-row tiles without requantization and computes GDN decay as
-`float(-exp(double(A_log)))`, which may differ by one float ULP in this small
-vector from packages produced with MLX's float exponential. `GgufPreparation`
-repacks GGUF blocks ([GGUF targets](#gguf-targets)).
+Source adapters write a model's target, draft and vision tensors into prepared
+files: an MLX target, the DFlash2 draft and any vision tower into the packed
+layouts of Splash packages, which run the same kernels, and a GGUF target into
+the `MDGG0001` layout of the GGUF kernels. Each adapter is a loader, which
+validates the source's metadata and plans its files, and a writer:
+`AffineTargetLoader` (`AffineTarget.cpp`) and `AffinePreparation` for an MLX
+target, `DraftCheckpointLoader` (`DraftCheckpoint.cpp`) and `AffinePreparation`
+for the draft, `GgufTargetLoader` (`GgufTarget.cpp`, planned by `GgufImage.cpp`)
+and `GgufPreparation` for a GGUF target, `VisionLoader` and `VisionPreparation`
+for an MLX or GGUF vision tower. They open their files through `PreparedFiles`,
+the `PreparedWeights` cache with the load's guards. `AffinePreparation` reorders
+an MLX target's codes, scales and biases into 256-row tiles without
+requantization, quantizes the draft's BF16 projections into the same tiles
+([Drafts](#drafts)) and computes GDN decay as `float(-exp(double(A_log)))`,
+which may differ by one float ULP in this small vector from packages produced
+with MLX's float exponential. `GgufPreparation` repacks GGUF blocks ([GGUF
+targets](#gguf-targets)).
 
-Preparation never rounds a weight. A tensor it converts to BF16 (vision tensors
-stored as F32 or F16, a GGUF's convolution taps and time-step bias) must be
-exactly representable in BF16; otherwise preparation fails, naming the tensor
-and, for a vision tensor, its file.
+Preparation never rounds a target or vision weight, and rounds the draft's
+projections only as the packages' drafts are rounded. A tensor it converts to
+BF16 (vision tensors stored as F32 or F16, a GGUF's convolution taps and
+time-step bias) must be exactly representable in BF16; otherwise preparation
+fails, naming the tensor and, for a vision tensor, its file.
 
 The cache is `~/Library/Caches/Splash/weights`, or the directory
 `SPLASH_WEIGHT_CACHE` names; nothing else selects it. It holds an additional
-copy of the weights about the model's size, its prepared target and vision
-tensors. Preparing needs that much free disk space plus a 2 GiB reserve: before
-anything is written, the factory (`ModelFactory.cpp`) constructs the vision
-tower's loader (`planVisionLoader`, which the vision encoder test shares) and
-the target's, and checks the space of every missing file they plan, plus the
-reserve, once. Uninstalling a model does not delete possibly
-shared prepared weights. With Splash stopped, entry directories can be deleted;
-deleting the whole cache causes preparation at the next load.
+copy of the weights about the model's size, its prepared target, draft and
+vision tensors. Preparing needs that much free disk space plus a 2 GiB reserve:
+before anything is written, the factory (`ModelFactory.cpp`) constructs the
+vision tower's loader (`planVisionLoader`, which the vision encoder test
+shares), the draft's and the target's, and checks the space of every missing
+file they plan, plus the reserve, once. Uninstalling a model does not delete
+possibly shared prepared weights. With Splash stopped, entry directories can be
+deleted; deleting the whole cache causes preparation at the next load.
 
 A prepared file's key hashes its adapter's preparation identity, its plan, and
 the bytes, type and shape of every source tensor it reads, located and hashed
@@ -838,9 +834,9 @@ make test-agent-real MODEL=mlx-community/Qwen3.6-35B-A3B-4bit REVISION=<commit> 
 ```
 
 Pin each upstream model to one commit, the same on both Macs. Without a Hub
-token for the draft repository, set `DRAFT_MODEL` to a draft folder
-([Draft assets](#draft-assets)). The Metal suite depends on the GPU family, so
-it runs once on each Mac. Per model, `release-check`:
+token for a private draft repository, set `DRAFT_MODEL` to a local copy of the
+draft's checkpoint ([Drafts](#drafts)). The Metal suite depends on the GPU
+family, so it runs once on each Mac. Per model, `release-check`:
 
 - runs the runtime oracle and, when the installation serves vision, vision
   parity (`test-real`);

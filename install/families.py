@@ -15,15 +15,12 @@ if __package__:
 else:
     import models
 
-# Splash's DFlash2 drafts share one repository, a folder per base model named
-# after it: config.json (the original DFlash2 configuration plus its "splash"
-# format and source), model.bin and layer-N.bin (models.DRAFT_LAYER_MAGIC).
-DRAFTS = "incoai-internal/Splash-DFlash2"
-
 
 @dataclass(frozen=True)
 class Draft:
-    # The commit of DRAFTS that published this family's folder.
+    # The DFlash2 checkpoint as its repository releases it, config.json and
+    # BF16 safetensors, at the commit Splash pins; loading prepares it.
+    repo: str
     revision: str
     layers: int
 
@@ -51,7 +48,9 @@ FAMILIES = (
             ("num_key_value_heads", 4),
             ("head_dim", 256),
         ),
-        Draft("f0ce2ff58f760c7e251a2a2454528273c3fa870b", 5),
+        Draft(
+            "incoai/Qwen3.8-27B-DFlash2", "015e795645c74b1a0eeef3b570031fb62e769bc5", 5
+        ),
     ),
     ModelFamily(
         "Qwen3.6-35B-A3B",
@@ -67,7 +66,11 @@ FAMILIES = (
             ("num_experts", 256),
             ("num_experts_per_tok", 8),
         ),
-        Draft("b36f132a9c832599c6d08a1443cb8bbe4c2ac6cb", 6),
+        Draft(
+            "incoai-internal/Qwen3.6-35B-A3B-DFlash2",
+            "d0d865a794d31db03c94ad8ec86e68fd14f9875f",
+            6,
+        ),
     ),
 )
 

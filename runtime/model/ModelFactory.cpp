@@ -1,9 +1,12 @@
 #include "ModelFactory.hpp"
 #include "model/AffineTarget.hpp"
+#include "model/DraftCheckpoint.hpp"
 #include "model/GgufTarget.hpp"
 #include "model/QwenTargetLoader.hpp"
 
+#include <functional>
 #include <limits>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <type_traits>
@@ -46,11 +49,17 @@ ModelPackage loadPackage(metal::MetalBackend &backend,
   if (!result.descriptor.valid())
     throw std::invalid_argument("model descriptor is invalid");
   const PreparationCheck check = [&backend] { backend.checkOperation(); };
-  // Every prepared file of the model, the vision tower's and the target's, is
-  // planned before the first is written, so one disk check budgets them all.
+  // Every prepared file of the model, the vision tower's, the draft's and the
+  // target's, is planned before the first is written, so one disk check
+  // budgets them all.
   const auto vision = planVisionLoader(backend, root, result.descriptor, admitConversion);
   std::vector<PreparedWeight> prepared;
   if (vision) prepared.push_back(vision->weight());
+  std::optional<DraftCheckpointLoader> draft;
+  if (result.descriptor.draftSource == DraftSource::Checkpoint) {
+    draft.emplace(backend, root / "draft", result.descriptor.draft, admitConversion);
+    prepared.insert(prepared.end(), draft->weights().begin(), draft->weights().end());
+  }
   result.target = std::visit(
       [&](const auto &layout) -> TargetWeights {
         using Layout = std::remove_cvref_t<decltype(layout)>;
@@ -78,7 +87,10 @@ ModelPackage loadPackage(metal::MetalBackend &backend,
       },
       result.descriptor.target);
   result.draft = loadDFlashDraftWeights(
-      backend, root / "draft", result.descriptor.draft);
+      backend,
+      draft ? DraftFiles(std::ref(*draft))
+            : DraftFiles(PackedDraftFiles{backend, root / "draft", result.descriptor.draft}),
+      result.descriptor.draft);
   result.vision = loadVisionWeights(backend, root, result.descriptor, vision.get());
 
   std::vector<WeightFileRecord> records(result.targetFiles().begin(),
@@ -135,10 +147,12 @@ uint64_t preparedModelWeightBytes(const std::filesystem::path &root, const Model
   } else if (descriptor.targetSource == TargetSource::Mlx) {
     bytes = std::visit([](const auto &layout) { return preparedAffineBytes(layout); }, descriptor.target);
   }
+  if (descriptor.draftSource == DraftSource::Checkpoint) bytes += preparedDraftBytes(descriptor.draft);
   if (descriptor.visionSource == VisionSource::Mlx || descriptor.visionSource == VisionSource::Gguf)
     bytes += preparedVisionBytes(descriptor.vision);
   for (std::string_view directory : {"target", "draft", "vision"}) {
     if (directory == "vision" && descriptor.visionSource != VisionSource::Packed) continue;
+    if (directory == "draft" && descriptor.draftSource != DraftSource::Packed) continue;
     if (directory == "target" && descriptor.targetSource != TargetSource::Packed) continue;
     for (const auto &entry : std::filesystem::recursive_directory_iterator(root / directory)) {
       if (!entry.is_regular_file()) continue;

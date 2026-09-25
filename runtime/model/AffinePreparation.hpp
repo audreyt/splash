@@ -1,10 +1,12 @@
 #pragma once
 
-// The images of an MLX affine checkpoint in the existing packed target ABI,
-// as model/AffineTarget.cpp plans them: their identity and their writer.
-// Codes, scales and biases are reordered into 256-row tiles without
-// requantization, the GDN decay becomes float(-exp(double(A_log))), and
-// every other tensor is copied as stored.
+// The affine images of a checkpoint in the existing packed ABI, as
+// model/AffineTarget.cpp plans an MLX target's and model/DraftCheckpoint.cpp a
+// DFlash2 draft's: their identity and their writer. An MLX projection's
+// codes, scales and biases are reordered into 256-row tiles without
+// requantization, a BF16 projection is quantized into the same tiles as MLX's
+// affine quantization rounds it, the GDN decay becomes
+// float(-exp(double(A_log))), and every other tensor is copied as stored.
 
 #include "model/PreparedWeights.hpp"
 
@@ -14,7 +16,7 @@
 
 namespace splash::model::affine {
 
-enum class SectionKind { Copy, Decay, Projection };
+enum class SectionKind { Copy, Decay, Projection, Quantize };
 
 // A checkpoint tensor a section reads: its name, the dtypes it is read in and
 // its shape, planned from the layout; tensor is bound once the checkpoint is
@@ -26,7 +28,8 @@ struct Input {
   const SourceTensor *tensor = nullptr;
 };
 
-// Source rows of a fused projection: weight, scales and biases.
+// Source rows of a fused projection: its MLX weight, scales and biases
+// (Projection), or its BF16 weight (Quantize).
 struct ProjectionPart {
   uint32_t rows = 0;
   std::vector<Input> fields;
@@ -35,8 +38,10 @@ struct ProjectionPart {
 struct Section {
   SectionKind kind = SectionKind::Copy;
   uint64_t offset = 0, bytes = 0;
-  Input input;                       // Copy and Decay
-  std::vector<ProjectionPart> parts; // Projection: parts in row order, then zero rows
+  Input input; // Copy and Decay
+  // Projection and Quantize: the parts in row order. A Projection's rows past
+  // them are zero; a Quantize section has none, nor experts, and 4 bits.
+  std::vector<ProjectionPart> parts;
   uint32_t rows = 0, columns = 0, experts = 1, bits = 4;
 };
 

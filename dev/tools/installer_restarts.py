@@ -173,11 +173,14 @@ def loaded_entries(link: Path, cache: Path):
     if models.installation_kind(link) == models.PACKAGE:
         return []  # A package's files are mapped as they are.
     record = models.read_json(link / "model.json")
-    layers = dict(families.named(record["family"]).signature)["num_hidden_layers"]
+    family = families.named(record["family"])
+    layers = dict(family.signature)["num_hidden_layers"]
     components = {
         "target/embedding.bin",
         "target/head.bin",
         *(f"target/layer-{index}.bin" for index in range(layers)),
+        "draft/model.bin",
+        *(f"draft/layer-{index}.bin" for index in range(family.draft.layers)),
     }
     if record["vision_format"] != "none":
         components.add("vision/model.bin")
@@ -185,7 +188,7 @@ def loaded_entries(link: Path, cache: Path):
     # of an MLX model links the target's shards again.
     sources = {}
     for name in record["files"]:
-        if name.startswith(("target/", "vision/")) and name.endswith(
+        if name.startswith(("target/", "draft/", "vision/")) and name.endswith(
             (".safetensors", ".gguf")
         ):
             sources.setdefault((link / name).resolve(), link / name)

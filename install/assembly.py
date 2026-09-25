@@ -22,8 +22,9 @@ The paths an assembly links, and what reads each:
   tokenizer/<file>       the MLX tokenizer files, or tokenizer.json,
                          tokenizer_config.json and chat_template.jinja derived
                          from the GGUF (server.py --tokenizer)
-  draft/config.json, draft/model.bin, draft/layer-<N>.bin
-                         the DFlash2 draft (ModelDescriptor.mm, DFlashDraft.cpp)
+  draft/config.json, draft/<name>.safetensors
+                         the DFlash2 checkpoint (ModelDescriptor.mm,
+                         DraftCheckpoint.cpp)
   vision/config.json, vision/<shard>
                          the MLX shards holding vision_tower.*
                          (VisionLoader.cpp, through SafetensorsCheckpoint.mm)
