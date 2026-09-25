@@ -4518,6 +4518,52 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(error["code"], "invalid_model_output")
         self.assertNotIn("<tool_call>", payload.decode())
 
+    def test_prose_beside_a_call_can_name_tool_tags(self):
+        # The grammar keeps only <tool_call> out of prose; other tags are text.
+        tokenizer = FakeTokenizer()
+        tokenizer.fragments[40] = "Fix the </parameter> and <function= handling.\n"
+        tokenizer.backend_tokenizer = _byte_backend(tokenizer.fragments)
+        tools = [{"type": "function", "function": {"name": "weather"}}]
+        prose = tokenizer.fragments[40] + "\n"
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                harness = self.harness(
+                    FakeRuntime(Plan([[40], [5]])), tokenizer=tokenizer
+                )
+                status, _, payload = harness.request(
+                    "POST",
+                    "/v1/chat/completions",
+                    self.body(tools=tools, stream=stream, reasoning_effort="none"),
+                )
+                self.assertEqual(status, 200, payload)
+                if stream:
+                    chunks = [
+                        json.loads(line[6:])
+                        for line in payload.decode().splitlines()
+                        if line.startswith("data: {")
+                    ]
+                    self.assertFalse(any("error" in chunk for chunk in chunks))
+                    deltas = [chunk["choices"][0]["delta"] for chunk in chunks]
+                    content = "".join(delta.get("content") or "" for delta in deltas)
+                    names = [
+                        call["function"]["name"]
+                        for delta in deltas
+                        for call in delta.get("tool_calls", [])
+                        if "name" in call["function"]
+                    ]
+                    reason = chunks[-1]["choices"][0]["finish_reason"]
+                else:
+                    choice = json.loads(payload)["choices"][0]
+                    content = choice["message"]["content"]
+                    names = [
+                        call["function"]["name"]
+                        for call in choice["message"]["tool_calls"]
+                    ]
+                    reason = choice["finish_reason"]
+                self.assertEqual(
+                    (content, names, reason), (prose, ["weather"], "tool_calls")
+                )
+
     def test_incomplete_tool_prefix_preserves_whitespace_without_xml(self):
         plans = [Plan([[20], [19]], reason="length") for _ in range(4)]
         harness = self.harness(FakeRuntime(*plans))
