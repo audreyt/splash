@@ -756,13 +756,19 @@ THINK_END = "</think>"
 
 
 def tool_grammar(policy, thinking, response_schema=None):
+    try:
+        arguments = [
+            _argument_grammar(schema) for schema in policy.argument_schemas.values()
+        ]
+    except (AttributeError, TypeError) as error:
+        # An older declared dialect leaves newer keywords unchecked, so framing
+        # can meet any JSON value where it reads part of a schema.
+        raise APIError(400, "unsupported tool parameter schema") from error
     side_grammars = []
     tag_rules = []
-    for index, (name, schema) in enumerate(policy.argument_schemas.items()):
+    for index, (name, grammar) in enumerate(zip(policy.argument_schemas, arguments)):
         grammar_name = f"arguments_{index}"
-        side_grammars.append(
-            {"name": grammar_name, "lark_grammar": _argument_grammar(schema)}
-        )
+        side_grammars.append({"name": grammar_name, "lark_grammar": grammar})
         tag_rules.append(
             f"tool_{index}: {'WS' if response_schema is not None else 'TEXT'} {TOOL_CALL_OPEN} "
             f"{json.dumps(FUNCTION_OPEN + name + '>' + chr(10))} "

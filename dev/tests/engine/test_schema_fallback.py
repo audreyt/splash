@@ -420,3 +420,22 @@ class SchemaFallbackTests(unittest.TestCase):
         with self.assertRaises(api.APIError) as caught:
             tool_schema.tool_grammar(self.policy({"$ref": "#/$defs/missing"}), False)
         self.assertEqual(caught.exception.status, 400)
+
+    def test_unchecked_keywords_of_older_dialects_are_request_errors(self):
+        # An older declared dialect leaves newer keywords unchecked, so they
+        # can hold any value. That is the client's schema error, not a crash.
+        for draft, keywords in (
+            ("draft-07", {"dependentSchemas": 5}),
+            ("draft-03", {"allOf": 5}),
+            ("draft-03", {"required": True}),
+            ("draft-04", {"$ref": {"a": 1}}),
+            ("draft-03", {"properties": {"value": {"anyOf": 5}}}),
+        ):
+            schema = {
+                "$schema": f"http://json-schema.org/{draft}/schema#",
+                "type": "object",
+                **keywords,
+            }
+            with self.subTest(schema=schema), self.assertRaises(api.APIError) as caught:
+                tool_schema.tool_grammar(self.policy(schema), False)
+            self.assertEqual(caught.exception.status, 400)
