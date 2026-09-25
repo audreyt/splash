@@ -103,6 +103,11 @@ install-environment:
 	@/usr/bin/lockf -k "$(INSTALL_LOCK)" $(MAKE) --no-print-directory \
 		-f "$(SPLASH_MAKEFILE)" _install-environment
 
+# The environment is created from the interpreter under the candidate's
+# installation prefix (sys.base_prefix). A symlinked launcher, such as uv's,
+# names a directory without the standard library, and a resolved path names a
+# versioned Homebrew keg that brew upgrade deletes; Homebrew's prefix is its
+# stable opt path.
 _install-environment:
 	@set -eu; \
 	if test -f "$(VENV)/pyvenv.cfg" && test -x "$(PYTHON)" \
@@ -114,7 +119,7 @@ _install-environment:
 		bootstrap=; \
 		for candidate in $(PYTHON_CANDIDATES); do \
 			command -v "$$candidate" >/dev/null 2>&1 || continue; \
-			base=$$("$$candidate" -c 'import sys; print(getattr(sys, "_base_executable", sys.executable))') \
+			base=$$("$$candidate" -c 'import os, sys; path = os.path.join(sys.base_prefix, "bin", "python%d.%d" % sys.version_info[:2]); print(path if os.path.exists(path) else getattr(sys, "_base_executable", sys.executable))') \
 				|| continue; \
 			"$$base" -c 'import sys; raise SystemExit(not ((3, 12) <= sys.version_info[:2] < (3, 15)))' \
 				>/dev/null 2>&1 || continue; \
