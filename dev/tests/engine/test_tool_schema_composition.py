@@ -1,6 +1,7 @@
 import copy
 import json
 import unittest
+from unittest import mock
 
 from llguidance import LLMatcher
 
@@ -184,6 +185,89 @@ class ToolSchemaCompositionTests(unittest.TestCase):
             tool_schema.raw_string_schema({"anyOf": schema["anyOf"]}, schema),
             ("raw", None),
         )
+
+    def test_shared_references_are_projected_once(self):
+        # Two references per level to the next definition used to double the
+        # work at every level; a 1.6 KB schema took hours.
+        depth = 14
+        definitions = {
+            f"d{i}": {
+                "anyOf": [{"$ref": f"#/$defs/d{i + 1}"}, {"$ref": f"#/$defs/d{i + 1}"}]
+            }
+            for i in range(depth)
+        }
+        definitions[f"d{depth}"] = {
+            "type": "object",
+            "properties": {"x": {"type": "string"}},
+            "required": ["x"],
+        }
+        field = {"$ref": "#/$defs/d0"}
+        lookup = tool_schema._lookup_tool_reference
+        for schema, arguments, invalid in (
+            ({"$defs": definitions, **field}, {"x": "a"}, {"x": 1}),
+            (
+                {"$defs": definitions, "properties": {"value": field}},
+                {"value": {"x": "a"}},
+                {"value": {"x": 1}},
+            ),
+        ):
+            tool = {"type": "function", "function": {"name": "t", "parameters": schema}}
+            policy = tool_schema.normalize_tools([tool], "required", False)[1]
+            with (
+                self.subTest(schema=sorted(schema)),
+                mock.patch.object(
+                    tool_schema, "_lookup_tool_reference", side_effect=lookup
+                ) as counted,
+            ):
+                tool_schema.tool_grammar(policy, False)
+            # A few lookups per reference, rather than one per path.
+            self.assertLess(counted.call_count, 4 * (depth + 1))
+            self.check_arguments(schema, arguments, invalid)
+
+    def test_framing_is_bounded_across_the_tools_of_a_request(self):
+        # Composition and root copies can make the framed schemas quadratic or
+        # exponential in the tool schemas; one budget covers all tools.
+        def policy(*schemas):
+            tools = [
+                {"type": "function", "function": {"name": f"t{i}", "parameters": s}}
+                for i, s in enumerate(schemas)
+            ]
+            return tool_schema.normalize_tools(tools, "auto", True)[1]
+
+        wide = {
+            "anyOf": [
+                {
+                    "properties": {f"b{i}_{j}": {"type": "integer"} for j in range(5)},
+                    "additionalProperties": {"type": "string", "description": str(i)},
+                }
+                for i in range(30)
+            ]
+        }
+        copies = {
+            "$defs": {"x": {"type": "integer"}},
+            "properties": {f"p{i}": {"$ref": "#/$defs/x"} for i in range(200)},
+        }
+        nested = {"$defs": {"d16": {"properties": {"x": {"type": "integer"}}}}}
+        for i in range(16):
+            ref = {"$ref": f"#/$defs/d{i + 1}"}
+            narrower = {"allOf": [ref, {"properties": {"x": {"minimum": i}}}]}
+            nested["$defs"][f"d{i}"] = {"anyOf": [ref, narrower]}
+        nested["$ref"] = "#/$defs/d0"
+        half = {"properties": {"x": {"description": "d" * 12_000}}}
+        with mock.patch.object(tool_schema, "MAX_FRAMED_SCHEMA_BYTES", 20_000):
+            tool_schema.tool_grammar(policy(half), False)
+            for name, schemas in (
+                ("wide union", [wide]),
+                ("root copies", [copies]),
+                ("nested alternatives", [nested]),
+                ("two tools", [half, half]),
+            ):
+                with (
+                    self.subTest(name),
+                    self.assertRaisesRegex(APIError, "too complex") as caught,
+                ):
+                    tool_schema.tool_grammar(policy(*schemas), False)
+                self.assertEqual(caught.exception.status, 400)
 
     def test_recursive_objects_keep_json_framing_and_validation(self):
         self.check_arguments(

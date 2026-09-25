@@ -34,6 +34,12 @@ THINK_END_TOKEN_ID = 248069  # the chat template's think-close token
 
 LOCAL_REGISTRY = Registry()
 
+# Framing projects each tool's fields through schema composition and copies
+# the root schema into every field that refers to it. Pathological schemas
+# make that quadratic or exponential in their size, so framing all tools of
+# a request may produce about this many bytes of schemas.
+MAX_FRAMED_SCHEMA_BYTES = 16 * 1024 * 1024
+
 
 @dataclass(frozen=True)
 class ToolPolicy:
@@ -45,8 +51,10 @@ class ToolPolicy:
 
     @cached_property
     def argument_schemas(self):
+        budget = [MAX_FRAMED_SCHEMA_BYTES]
         return {
-            name: tool_argument_schema(schema) for name, schema in self.schemas.items()
+            name: tool_argument_schema(schema, budget)
+            for name, schema in self.schemas.items()
         }
 
 
@@ -270,10 +278,10 @@ def _schema_with_root(schema, root):
 
 
 def raw_string_schema(schema, root):
-    return _raw_string_schema(schema, root, frozenset())
+    return _raw_string_schema(schema, root, frozenset(), {})
 
 
-def _raw_string_schema(schema, root, ancestors):
+def _raw_string_schema(schema, root, ancestors, results):
     schema = _resolve_tool_schema(schema, root)
     if not isinstance(schema, dict):
         return None
@@ -299,7 +307,12 @@ def _raw_string_schema(schema, root, ancestors):
             if null_only:
                 allows_null = True
                 continue
-            option = _raw_string_schema(option_schema, root, ancestors)
+            # A definition reached through several references is read once.
+            if id(resolved) not in results:
+                results[id(resolved)] = _raw_string_schema(
+                    option_schema, root, ancestors, results
+                )
+            option = results[id(resolved)]
             if option is None:
                 has_other_type = True
             else:
@@ -363,7 +376,10 @@ def _raw_string_schema(schema, root, ancestors):
 
 def _schema_combination(keyword, values):
     identity = keyword == "allOf"
-    values = [value for value in values if value is not identity]
+    # A definition reached through several references combines once.
+    values = list(
+        {id(value): value for value in values if value is not identity}.values()
+    )
     if not values:
         return identity
     if any(value is not identity and isinstance(value, bool) for value in values):
@@ -379,13 +395,34 @@ def _schema_combination(keyword, values):
     return combined
 
 
-def tool_argument_schema(root):
+def _json_size(value, limit):
+    """Approximate serialized size of ``value``, counted no further than ``limit``."""
+    size, pending = 0, [value]
+    while pending and size <= limit:
+        value = pending.pop()
+        if isinstance(value, dict):
+            pending.extend(value)
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+        size += len(value) if isinstance(value, str) else 1
+    return size
+
+
+def tool_argument_schema(root, budget=None):
     """Project object fields for XML framing; validate the untouched schema.
 
     Cross-field assertions remain on ToolPolicy.validators. This projection
     preserves the set of possible field values rather than choosing a branch
     before the model has supplied the discriminator or dependent properties.
     """
+    if budget is None:
+        budget = [MAX_FRAMED_SCHEMA_BYTES]
+
+    def charge(size):
+        budget[0] -= size
+        if budget[0] < 0:
+            raise APIError(400, "tool parameter schemas are too complex")
 
     def combine(shapes, union=False):
         if union:
@@ -397,6 +434,7 @@ def tool_argument_schema(root):
         if not shapes:
             return {"properties": {}, "required": [], "additionalProperties": True}
         names = dict.fromkeys(name for shape in shapes for name in shape["properties"])
+        charge(len(names) * len(shapes))
         required = set(shapes[0]["required"])
         for shape in shapes[1:]:
             if union:
@@ -420,6 +458,8 @@ def tool_argument_schema(root):
                 keyword, [shape["additionalProperties"] for shape in shapes]
             ),
         }
+
+    references = {}
 
     def project(node, visiting):
         if node is False:
@@ -449,8 +489,10 @@ def tool_argument_schema(root):
         if ref is not None:
             if ref in visiting:
                 raise APIError(400, "cyclic direct tool argument reference")
-            resolved = _lookup_tool_reference(ref, root)
-            shapes.append(project(resolved, visiting | {ref}))
+            if ref not in references:
+                resolved = _lookup_tool_reference(ref, root)
+                references[ref] = project(resolved, visiting | {ref})
+            shapes.append(references[ref])
         for child in node.get("allOf", []):
             shapes.append(project(child, visiting))
         for keyword in ("anyOf", "oneOf"):
@@ -494,17 +536,22 @@ def tool_argument_schema(root):
             )
         return combine(shapes)
 
+    def framed(value):
+        # Shared definitions repeat in the serialized grammar; count them all.
+        charge(_json_size(value, budget[0]))
+        framed_value = _schema_with_root(value, root)
+        if framed_value is not value:
+            charge(_json_size(root, budget[0]))
+        return framed_value
+
     shape = project(root, set())
     if shape is None:
         raise APIError(400, "tool parameters must allow a top-level JSON object")
     shape["type"] = "object"
     shape["properties"] = {
-        name: _schema_with_root(value, root)
-        for name, value in shape["properties"].items()
+        name: framed(value) for name, value in shape["properties"].items()
     }
-    shape["additionalProperties"] = _schema_with_root(
-        shape["additionalProperties"], root
-    )
+    shape["additionalProperties"] = framed(shape["additionalProperties"])
     return shape
 
 
