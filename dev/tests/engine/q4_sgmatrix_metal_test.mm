@@ -327,6 +327,8 @@ void fusedNorm(metal::MetalBackend &backend, uint32_t k, uint32_t rows, LinearIn
   metal::CommandGraph graph;
   require(Normalization::addRms(graph,c.input,c.weight,output,k,rows).layout==LinearInput::Plain,
           "plain norm claimed a table");
+  require(graph.dispatches().back().pipelineName.starts_with("norm_rms_staged")==(k<=SPLASH_STAGED_NORM_WIDTH),
+          "plain norm staged the wrong widths");
   addReferencePreparation(graph,layout,output,a,sa,k,rows/8);
   const PreparedInput prepared=Normalization::addRms(graph,c.input,c.weight,fused,k,rows,{b,sb,{},{}},layout);
   require(prepared.layout==layout && prepared.source.sameView(fused),"fused norm did not report the table it wrote");
@@ -346,6 +348,9 @@ void prefillNorm(metal::MetalBackend &backend, uint32_t k, uint32_t rows) {
   metal::CommandGraph graph;
   Normalization::addRmsWithQ4Sums(graph,c.input,c.weight,output,sums,k,rows);
   Normalization::addRms(graph,c.input,c.weight,plain,k,rows);
+  require(graph.dispatches().back().pipelineName.starts_with("norm_rms_staged")==
+              (rows<=SPLASH_STAGED_NORM_ROWS && k<=SPLASH_STAGED_NORM_WIDTH),
+          "plain norm staged the wrong rows");
   (void)backend.submitCommand(graph.dispatches());
   requireNorm(c,output,k,rows,"prefill norm differs from the fp64 reference");
   require(!std::memcmp(output.contents(),plain.contents(),k*rows*2),"prefill norm rows differ from the plain norm's");
@@ -410,7 +415,7 @@ int main(int argc,char **argv) {
       for (uint32_t width : {64U, 320U, 1984U, 2048U, 2112U, 5120U, 17408U})
         for (uint32_t rows : {8U,16U,24U,32U}) fusedNorm(backend, width, rows, layout, float32);
     for (uint32_t width : {64U, 2048U, 5120U, 17408U})
-      for (uint32_t rows : {1U,37U,64U}) prefillNorm(backend, width, rows);
+      for (uint32_t rows : {1U,37U,64U,65U}) prefillNorm(backend, width, rows);
     // 27B out_proj then down, and gdn_in then gate/up: K 6144, 17408 and 5120.
     for (uint32_t lanes : {1U, 4U}) {
       splitVisibility(backend, {{{{5120, 6144}, LinearEpilogue::Residual}, {{5120, 17408}, LinearEpilogue::Residual}}}, lanes);
