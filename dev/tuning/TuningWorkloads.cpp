@@ -122,7 +122,7 @@ TuningWorkloads collectTuningWorkloads(
         bothPhases(mixer.inputProjection);
         bothPhases(mixer.outputProjection, LinearEpilogue::Residual);
       }, layer.mixer);
-      if constexpr (requires { layer.gateProjection; }) {
+      if constexpr (decltype(target.layout)::ffnKind == QwenFfnKind::Dense) {
         projection(layer.gateProjection, LinearPhase::Prefill,
                      LinearEpilogue::None);
         projection(layer.upProjection, LinearPhase::Prefill,
@@ -134,11 +134,11 @@ TuningWorkloads collectTuningWorkloads(
         // GGUF MoE blocks are not tuned either: a choice table may not hold them.
         if (layer.ffn.layout() != ops::WeightLayout::Affine64) continue;
         for (uint32_t rows : prefillRows) {
-          ops::MoeWorkload workload{geometry.moe, rows, ops::MoePhase::Prefill};
+          ops::MoeWorkload workload{geometry.moeShape(), rows, ops::MoePhase::Prefill};
           appendDistinct(moe, workload, layer.ffn);
         }
         for (uint32_t width : decodeWidths) {
-          ops::MoeWorkload workload{geometry.moe,
+          ops::MoeWorkload workload{geometry.moeShape(),
               width * ExecutionLimits::targetVerifyRows, ops::MoePhase::Decode};
           appendDistinct(moe, workload, layer.ffn);
         }

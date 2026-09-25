@@ -10,6 +10,7 @@
 #include "ops/ExecutionPlans.hpp"
 
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <variant>
 
@@ -75,6 +76,20 @@ struct RuntimeContext final {
 // architectures. Each architecture validates its own tensor and state layout.
 void requireCompatibleModelPackage(const ModelPackage &package);
 
+[[nodiscard]] uint64_t preparedModelWeightBytes(const std::filesystem::path &root,
+                                                 const ModelDescriptor &descriptor);
+
+// The vision role's upstream source, planned for preparation; null for a
+// packed vision file or a model without vision.
+[[nodiscard]] std::unique_ptr<VisionLoader>
+planVisionLoader(metal::MetalBackend &backend, const std::filesystem::path &root,
+                 const ModelDescriptor &descriptor, PreparationCheck admitConversion = {});
+// The vision role: prepared by `loader` when there is one, else the packed
+// file; empty weights for a model without vision.
+[[nodiscard]] QwenVisionWeights
+loadVisionWeights(metal::MetalBackend &backend, const std::filesystem::path &root,
+                  const ModelDescriptor &descriptor, const VisionLoader *loader);
+
 // Production loading is selected by the validated package descriptor. There
 // is one shared engine and DFlash controller; only model execution differs.
 [[nodiscard]] ModelPackage
@@ -83,7 +98,7 @@ loadModelPackage(metal::MetalBackend &backend,
 [[nodiscard]] ModelPackage
 loadModelPackage(metal::MetalBackend &backend,
                  const std::filesystem::path &root,
-                 const ModelDescriptor &descriptor);
+                 const ModelDescriptor &descriptor, PreparationCheck admitConversion = {});
 
 [[nodiscard]] ModelMemoryPlan
 plannedRuntimeMemory(const DeviceCapabilities &device,

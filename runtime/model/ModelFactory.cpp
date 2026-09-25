@@ -1,5 +1,10 @@
 #include "ModelFactory.hpp"
+#include "model/AffineTarget.hpp"
+#include "model/GgufTarget.hpp"
+#include "model/QwenTargetLoader.hpp"
 
+#include <limits>
+#include <span>
 #include <stdexcept>
 #include <type_traits>
 #include <vector>
@@ -23,26 +28,58 @@ void requireCompatibleModelPackage(const ModelPackage &package) {
 
 namespace {
 
+TargetWeights readTarget(metal::MetalBackend &backend, const Qwen3_8Layout &layout,
+                         const QwenTargetFiles<Qwen3_8Layout> &files) {
+  return loadQwen3_8Weights(backend, layout, files);
+}
+
+TargetWeights readTarget(metal::MetalBackend &backend, const Qwen3_6MoeLayout &layout,
+                         const QwenTargetFiles<Qwen3_6MoeLayout> &files) {
+  return loadQwen3_6MoeWeights(backend, layout, files);
+}
+
 ModelPackage loadPackage(metal::MetalBackend &backend,
                          const std::filesystem::path &root,
-                         ModelDescriptor descriptor) {
+                         ModelDescriptor descriptor, PreparationCheck admitConversion = {}) {
   ModelPackage result;
   result.descriptor = std::move(descriptor);
   if (!result.descriptor.valid())
     throw std::invalid_argument("model descriptor is invalid");
+  const PreparationCheck check = [&backend] { backend.checkOperation(); };
+  // Every prepared file of the model, the vision tower's and the target's, is
+  // planned before the first is written, so one disk check budgets them all.
+  const auto vision = planVisionLoader(backend, root, result.descriptor, admitConversion);
+  std::vector<PreparedWeight> prepared;
+  if (vision) prepared.push_back(vision->weight());
   result.target = std::visit(
       [&](const auto &layout) -> TargetWeights {
-        if constexpr (std::is_same_v<std::remove_cvref_t<decltype(layout)>,
-                                     Qwen3_8Layout>)
-          return loadQwen3_8Weights(backend, root / "target", layout);
-        else
-          return loadQwen3_6MoeWeights(backend, root / "target", layout);
+        using Layout = std::remove_cvref_t<decltype(layout)>;
+        const std::filesystem::path directory = root / "target";
+        const auto read = [&](const QwenTargetFiles<Layout> &files,
+                              std::span<const PreparedWeight> target) {
+          prepared.insert(prepared.end(), target.begin(), target.end());
+          if (!prepared.empty()) PreparedWeights().requireSpace(prepared, check);
+          return readTarget(backend, layout, files);
+        };
+        switch (result.descriptor.targetSource) {
+        case TargetSource::Packed:
+          return read(PackedTargetFiles<Layout>{backend, directory, layout}, {});
+        case TargetSource::Mlx: {
+          AffineTargetLoader loader(backend, directory, layout, admitConversion);
+          return read(loader, loader.weights());
+        }
+        case TargetSource::Gguf: {
+          GgufTargetLoader loader(backend, findTargetGguf(directory), ggufTargetGeometry(layout),
+                                  admitConversion);
+          return read(loader, loader.weights());
+        }
+        }
+        throw std::invalid_argument("unknown target source");
       },
       result.descriptor.target);
   result.draft = loadDFlashDraftWeights(
       backend, root / "draft", result.descriptor.draft);
-  result.vision = loadQwenVisionWeights(
-      backend, root / "vision", result.descriptor.vision);
+  result.vision = loadVisionWeights(backend, root, result.descriptor, vision.get());
 
   std::vector<WeightFileRecord> records(result.targetFiles().begin(),
                                         result.targetFiles().end());
@@ -64,8 +101,54 @@ ModelPackage loadModelPackage(metal::MetalBackend &backend,
 
 ModelPackage loadModelPackage(metal::MetalBackend &backend,
                               const std::filesystem::path &root,
-                              const ModelDescriptor &descriptor) {
-  return loadPackage(backend, root, descriptor);
+                              const ModelDescriptor &descriptor, PreparationCheck admitConversion) {
+  return loadPackage(backend, root, descriptor, std::move(admitConversion));
+}
+
+std::unique_ptr<VisionLoader> planVisionLoader(metal::MetalBackend &backend, const std::filesystem::path &root,
+                                               const ModelDescriptor &descriptor,
+                                               PreparationCheck admitConversion) {
+  if (descriptor.visionSource != VisionSource::Mlx && descriptor.visionSource != VisionSource::Gguf)
+    return nullptr;
+  return std::make_unique<VisionLoader>(root / "vision", descriptor.visionSource, descriptor.vision,
+                                        [&backend] { backend.checkOperation(); },
+                                        std::move(admitConversion));
+}
+
+QwenVisionWeights loadVisionWeights(metal::MetalBackend &backend, const std::filesystem::path &root,
+                                    const ModelDescriptor &descriptor, const VisionLoader *loader) {
+  if (loader) return loadQwenVisionWeights(backend, *loader);
+  if (descriptor.visionSource == VisionSource::Packed)
+    return loadQwenVisionWeights(backend, root / "vision", descriptor.vision);
+  return {};
+}
+
+uint64_t preparedModelWeightBytes(const std::filesystem::path &root, const ModelDescriptor &descriptor) {
+  uint64_t bytes = 0;
+  if (descriptor.targetSource == TargetSource::Gguf) {
+    WeightSource source(findTargetGguf(root / "target"));
+    const GgufFile file(source);
+    for (const gguf::Image &image :
+         std::visit([&](const auto &layout) { return gguf::planImages(file, ggufTargetGeometry(layout)); },
+                    descriptor.target))
+      bytes += image.bytes;
+  } else if (descriptor.targetSource == TargetSource::Mlx) {
+    bytes = std::visit([](const auto &layout) { return preparedAffineBytes(layout); }, descriptor.target);
+  }
+  if (descriptor.visionSource == VisionSource::Mlx || descriptor.visionSource == VisionSource::Gguf)
+    bytes += preparedVisionBytes(descriptor.vision);
+  for (std::string_view directory : {"target", "draft", "vision"}) {
+    if (directory == "vision" && descriptor.visionSource != VisionSource::Packed) continue;
+    if (directory == "target" && descriptor.targetSource != TargetSource::Packed) continue;
+    for (const auto &entry : std::filesystem::recursive_directory_iterator(root / directory)) {
+      if (!entry.is_regular_file()) continue;
+      const uint64_t size = entry.file_size();
+      if (size > std::numeric_limits<uint64_t>::max() - bytes) throw std::overflow_error("model weight size overflows");
+      bytes += size;
+    }
+  }
+  if (!bytes) throw std::invalid_argument("model package contains no regular files");
+  return bytes;
 }
 
 } // namespace splash::model

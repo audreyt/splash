@@ -92,8 +92,11 @@ def check() -> list[str]:
         "model/ModelFactory.hpp",
         "model/Qwen3_6Moe.hpp",
         "model/Qwen3_8.hpp",
+        "model/QwenHybridLayout.hpp",
         "model/QwenState.hpp",
         "model/QwenTarget.hpp",
+        "model/QwenTargetFiles.hpp",
+        "model/QwenTargetLoader.hpp",
         "model/Runtime.hpp",
         "model/WeightStore.hpp",
     )

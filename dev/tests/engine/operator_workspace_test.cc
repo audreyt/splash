@@ -1,5 +1,5 @@
 #include "metal/abi/MoE.h"
-#include "model/WeightStore.hpp"
+#include "model/WeightLayout.hpp"
 #include "ops/MoE.hpp"
 #include "ops/PagedAttention.hpp"
 #include "ops/Sampling.hpp"

@@ -16,6 +16,11 @@ namespace splash::model {
 
 using TargetLayout = std::variant<Qwen3_8Layout, Qwen3_6MoeLayout>;
 
+// Where a model's weights come from: files already in the packed layout, or
+// an MLX or GGUF checkpoint prepared into cached files when it loads.
+enum class TargetSource : uint8_t { Packed, Mlx, Gguf };
+enum class VisionSource : uint8_t { Packed, Mlx, Gguf };
+
 // Package metadata validated before weight buffers are loaded. The engine
 // consumes capabilities; model loading consumes the concrete layouts.
 struct ModelDescriptor final {
@@ -29,6 +34,9 @@ struct ModelDescriptor final {
   // Exact bytes parsed during package inspection, including artifact digests.
   // Synthetic descriptors retain zero; this is separate from layout identity.
   std::array<uint8_t, 32> packageManifestSha256{};
+  // Container selection belongs to loading; runtime dispatch follows each weight.
+  TargetSource targetSource = TargetSource::Packed;
+  VisionSource visionSource = VisionSource::Packed;
 
   [[nodiscard]] bool valid() const noexcept;
 };

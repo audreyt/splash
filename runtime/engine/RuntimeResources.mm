@@ -78,30 +78,6 @@ uint8_t hexNibble(char value) {
   throw std::invalid_argument("manifest SHA-256 is not hexadecimal");
 }
 
-uint64_t checkedAdd(uint64_t left, uint64_t right, std::string_view label) {
-  if (right > std::numeric_limits<uint64_t>::max() - left) {
-    throw std::overflow_error(std::string(label) + " byte count overflows");
-  }
-  return left + right;
-}
-
-uint64_t packedModelFileBytes(const std::filesystem::path &root) {
-  uint64_t bytes = 0;
-  for (std::string_view directory : {"target", "draft", "vision"}) {
-    const std::filesystem::path package = root / directory;
-    for (const auto &entry :
-         std::filesystem::recursive_directory_iterator(package)) {
-      if (!entry.is_regular_file())
-        continue;
-      bytes = checkedAdd(bytes, entry.file_size(), "model package");
-    }
-  }
-  if (!bytes) {
-    throw std::invalid_argument("model package contains no regular files");
-  }
-  return bytes;
-}
-
 uint64_t mebibytes(uint64_t bytes) noexcept { return bytes / kMiB; }
 
 // The startup admission rule. Deliberately independent of the model size:
@@ -306,19 +282,40 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
 
   const uint64_t hostReserveBytes =
       EngineMemoryPolicy::hostAvailableReserveBytes(device.physicalMemoryBytes);
+  const uint64_t preparationReserveBytes =
+      hostReserveBytes + model::kWeightPreparationWorkspaceBytes;
   MemoryGovernor::HostAvailableMemoryProvider hostAvailableMemory =
       config.hostAvailableMemory ? config.hostAvailableMemory
                                  : queryHostAvailableMemory;
-  backend->setOperationGuard(
-      [cancelled = config.cancelled, pressure = config.memoryPressure,
-       hostAvailableMemory, hostReserveBytes] {
-        if (cancelled && cancelled())
-          throw metal::MetalBackendError("Metal operation cancelled");
-        requireStartupHeadroom(hostAvailableMemory, hostReserveBytes,
-            pressure ? pressure() : MemoryPressure::Normal);
-      });
+  // Startup work stops on cancellation and keeps its reserve of host memory.
+  const auto throwIfCancelled = [cancelled = config.cancelled] {
+    if (cancelled && cancelled())
+      throw metal::MetalBackendError("startup cancelled");
+  };
+  const auto currentPressure = [pressure = config.memoryPressure] {
+    return pressure ? pressure() : MemoryPressure::Normal;
+  };
+  const auto admitMetalOperation = [throwIfCancelled, currentPressure,
+                                    hostAvailableMemory, hostReserveBytes] {
+    throwIfCancelled();
+    requireStartupHeadroom(hostAvailableMemory, hostReserveBytes,
+                           currentPressure());
+  };
+  const auto admitWeightPreparation = [throwIfCancelled, currentPressure,
+                                       hostAvailableMemory,
+                                       preparationReserveBytes] {
+    throwIfCancelled();
+    const MemoryPressure level = currentPressure();
+    if (level != MemoryPressure::Normal)
+      throw metal::MetalAllocationError(
+          "weight preparation requires normal memory pressure",
+          metal::AllocationFailure::HostPressure);
+    requireStartupHeadroom(hostAvailableMemory, preparationReserveBytes, level);
+  };
+  backend->setOperationGuard(admitMetalOperation);
   try {
-    const uint64_t modelBytes = packedModelFileBytes(config.modelRoot);
+    const uint64_t modelBytes =
+        model::preparedModelWeightBytes(config.modelRoot, config.model);
     const uint64_t hardBudgetBytes = EngineMemoryPolicy::hardBudgetBytes(
         device.recommendedMaxWorkingSetBytes, config.maximumMemoryBytes);
     // Reject an impossible weight budget before registering model buffers.
@@ -333,8 +330,7 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
     }
     // Fail before opening the package when the machine has no headroom at
     // all; the guard installed above keeps checking as residency grows.
-    requireStartupHeadroom(hostAvailableMemory, hostReserveBytes,
-        config.memoryPressure ? config.memoryPressure() : MemoryPressure::Normal);
+    admitMetalOperation();
   } catch (const RuntimeResourcesError &) {
     throw;
   } catch (const metal::MetalAllocationError &error) {
@@ -348,7 +344,8 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
 
   model::ModelPackage package;
   try {
-    package = model::loadModelPackage(*backend, config.modelRoot, config.model);
+    package = model::loadModelPackage(*backend, config.modelRoot, config.model,
+                                      admitWeightPreparation);
     requireLoadedModel(package);
   } catch (const metal::MetalAllocationError &error) {
     throw RuntimeResourcesError(RuntimeResourceStage::ModelLoading,

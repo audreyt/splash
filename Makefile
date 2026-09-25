@@ -42,7 +42,7 @@ MACOS_MIN_VERSION := 26.4
 MACOS_TARGET_FLAG := -mmacosx-version-min=$(MACOS_MIN_VERSION)
 PROD_METALFLAGS := -std=metal4.0 -O3 -Wall -Wextra -Werror -Iruntime \
 	$(MACOS_TARGET_FLAG)
-ENGINE_CXXFLAGS := -std=c++20 -O3 -Wall -Wextra -Werror -Iruntime \
+ENGINE_CXXFLAGS := -std=c++20 -O3 -Wall -Wextra -Werror -Iruntime -I$(BUILD)/engine \
 	$(MACOS_TARGET_FLAG)
 ENGINE_OBJCXXFLAGS := $(ENGINE_CXXFLAGS) -fobjc-arc
 LIB := $(BUILD)/splash.metallib
@@ -226,14 +226,25 @@ ENGINE_CPP_SOURCES := \
 	runtime/engine/MemoryAudit.cpp \
 	runtime/engine/Status.cpp \
 	runtime/model/WeightStore.cpp \
+	runtime/model/GgufFile.cpp \
+	runtime/model/GgufImage.cpp \
+	runtime/model/GgufTarget.cpp \
+	runtime/model/AffineTarget.cpp \
+	runtime/model/AffinePreparation.cpp \
+	runtime/model/PreparedWeights.cpp \
+	runtime/model/GgufPreparation.cpp \
 	runtime/model/Qwen3_6Moe.cpp \
 	runtime/model/Qwen3_8.cpp \
 	runtime/model/QwenVision.cpp \
+	runtime/model/VisionPreparation.cpp \
+	runtime/model/VisionLoader.cpp \
 	runtime/model/QwenTarget.cpp \
+	runtime/model/QwenTargetLoader.cpp \
 	runtime/model/DFlashDraft.cpp \
 	runtime/model/ModelFactory.cpp \
 	runtime/model/QwenState.cpp
 ENGINE_MM_SOURCES := \
+	runtime/model/SafetensorsCheckpoint.mm \
 	runtime/model/ModelDescriptor.mm \
 	runtime/model/Runtime.mm \
 	runtime/model/RuntimeArenas.mm \
@@ -263,6 +274,23 @@ $(BUILD_ID_STAMP): force-build-identity | $(ENGINE_BUILD)
 
 $(BUILD_ID_HEADER): $(BUILD_ID_STAMP)
 	@:
+
+# Cache identities follow only the code that writes prepared bytes
+# (dev/tools/weight_preparation_identity.py). Make compares the header's
+# content with the identities when it starts, read-only, and rewrites it
+# only when they differ: an edited input, a new one or a tree copied with old
+# timestamps regenerates it, and an unchanged tree leaves every object that
+# uses it current. The preparation adapters under runtime/model include it:
+# their objects depend on it through their depfiles, and on a clean build it
+# is generated before any model object compiles.
+WEIGHT_PREPARATION_HEADER := $(ENGINE_BUILD)/WeightPreparationIdentity.hpp
+WEIGHT_PREPARATION_STALE := $(shell $(BUILD_ID_PYTHON) dev/tools/weight_preparation_identity.py \
+	--root . --header $(WEIGHT_PREPARATION_HEADER) --stale)
+
+$(WEIGHT_PREPARATION_HEADER): $(if $(WEIGHT_PREPARATION_STALE),force-build-identity) | $(ENGINE_BUILD)
+	@$(BUILD_ID_PYTHON) dev/tools/weight_preparation_identity.py --root . --header $@
+
+$(filter $(ENGINE_BUILD)/model/%.o,$(ENGINE_OBJECTS)): | $(WEIGHT_PREPARATION_HEADER)
 
 $(ENGINE_BUILD)/%.o: runtime/%.cpp
 	@mkdir -p $(dir $@)
