@@ -2,6 +2,7 @@
 #include "CommandWatchdog.hpp"
 #include "DeviceQueries.hpp"
 #include "MetalEvent.hpp"
+#include "Residency.hpp"
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -190,8 +191,12 @@ struct MetalAllocation {
     uint64_t sparseVirtualBytes = 0;
     bool placementSparse = false;
     BufferStorage storage = BufferStorage::Shared;
+    // Non-empty while kept resident. The residency set retains the buffer,
+    // and with it the backing, so the last view takes it out.
+    std::weak_ptr<Residency> residency;
 
     ~MetalAllocation() {
+        if (auto kept = residency.lock()) kept->remove(buffer);
         if (accounting && bytes) {
             accounting->allocatedBytes.fetch_sub(
                 bytes, std::memory_order_relaxed);
@@ -446,6 +451,8 @@ struct MetalBackend::Impl {
     std::vector<DispatchTiming> dispatchProfile;
     __strong id<MTLDevice> device = nil;
     __strong id<MTLCommandQueue> queue = nil;
+    // Allocations hold it weakly: they may outlive the backend.
+    std::shared_ptr<Residency> residency;
     __strong id<MTL4CommandQueue> sparseQueue = nil;
     __strong id<MTLSharedEvent> sparseEvent = nil;
     __strong id<MTLLibrary> library = nil;
@@ -562,6 +569,15 @@ struct MetalBackend::Impl {
         accounting->addResident(allocation->bytes);
         sampleDeviceMemory();
         return wrap(std::move(allocation));
+    }
+
+    MetalAllocation &allocationOf(const MetalBuffer &buffer) const {
+        if (!buffer.impl_ || !buffer.impl_->allocation ||
+            buffer.impl_->allocation->accounting != accounting) {
+            throw MetalBackendError(
+                "Metal buffer is empty or belongs to another backend");
+        }
+        return *buffer.impl_->allocation;
     }
 
     id<MTLComputePipelineState> pipeline(std::string_view name) {
@@ -696,11 +712,17 @@ CommandTiming CommandTicket::wait() {
 }
 
 MetalBackend::MetalBackend(std::string metallibPath, double commandTimeoutSeconds,
-                           uint32_t sparseTimeoutMilliseconds)
+                           uint32_t sparseTimeoutMilliseconds,
+                           double residencyKeepAliveSeconds)
     : impl_(std::make_unique<Impl>()) {
     impl_->asyncState->commandWatchdog = CommandWatchdog(commandTimeoutSeconds);
     if (!sparseTimeoutMilliseconds) {
         throw MetalBackendError("sparse mapping timeout must be positive");
+    }
+    if (!std::isfinite(residencyKeepAliveSeconds) ||
+        residencyKeepAliveSeconds <= 0.0) {
+        throw MetalBackendError(
+            "residency keep-alive must be finite and positive");
     }
     impl_->sparseTimeoutMilliseconds = sparseTimeoutMilliseconds;
     @autoreleasepool {
@@ -734,6 +756,8 @@ MetalBackend::MetalBackend(std::string metallibPath, double commandTimeoutSecond
         if (!impl_->queue) {
             throw MetalBackendError("unable to create Metal command queue");
         }
+        impl_->residency = std::make_shared<Residency>(
+            impl_->device, impl_->queue, residencyKeepAliveSeconds);
 
         NSString *path = checkedNSString(metallibPath, "metallib path");
         NSError *error = nil;
@@ -1253,6 +1277,19 @@ MetalBuffer MetalBackend::view(const MetalBuffer &base,
     return MetalBuffer(std::move(result));
 }
 
+void MetalBackend::keepResident(const MetalBuffer &buffer) {
+    MetalAllocation &allocation = impl_->allocationOf(buffer);
+    if (!allocation.residency.expired()) {
+        throw MetalBackendError("Metal buffer is already kept resident");
+    }
+    impl_->residency->add(allocation.buffer);
+    allocation.residency = impl_->residency;
+}
+
+uint64_t MetalBackend::lapsedResidentBytes() const noexcept {
+    return impl_->residency->lapsedBytes();
+}
+
 CommandTiming MetalBackend::submit(const ComputeDispatch &dispatch) {
     return submitAsync(dispatch).wait();
 }
@@ -1453,6 +1490,7 @@ CommandTicket MetalBackend::submitCommandAsync(
         ticketState->finishCommand(completedCommand);
     }];
     impl_->sampleDeviceMemory();
+    impl_->residency->use();
     id<MTLSharedEvent> event = impl_->sparseEvent;
     const bool pendingMap =
         sparseEventValue && event.signaledValue < sparseEventValue;

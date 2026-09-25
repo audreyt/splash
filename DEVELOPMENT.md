@@ -400,8 +400,10 @@ Runtime admission counts prepared weights, draft and vision exactly once
 too). Before loading, startup refuses a model whose prepared weights, with the
 pipeline and runtime reserves, one state cell and one KV extent, exceed the
 hard budget, so a model that can never fit is not prepared. File backing does
-not make Metal-resident pages reclaimable: residency wires them until
-released. macOS page cache, driver allocations and other applications still
+not make Metal-resident pages reclaimable, and `WeightFile` keeps its buffer
+resident (`MetalBackend::keepResident`): the weights stay wired between
+requests until 10 minutes pass without a command, and the next command wires
+them again. macOS page cache, driver allocations and other applications still
 affect memory pressure and swap.
 
 `loadQwenTarget` (`QwenTargetLoader.hpp`) reads a target's files

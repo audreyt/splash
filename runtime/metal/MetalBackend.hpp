@@ -264,10 +264,13 @@ private:
 class MetalBackend final {
 public:
   // A sparse map a command waits for, or an unmap, still pending after
-  // sparseTimeoutMilliseconds fails the command or the backend.
+  // sparseTimeoutMilliseconds fails the command or the backend. Buffers kept
+  // resident stay wired until residencyKeepAliveSeconds pass without a
+  // command.
   explicit MetalBackend(std::string metallibPath,
                         double commandTimeoutSeconds = 120.0,
-                        uint32_t sparseTimeoutMilliseconds = 30000);
+                        uint32_t sparseTimeoutMilliseconds = 30000,
+                        double residencyKeepAliveSeconds = 600.0);
   ~MetalBackend();
   // Invoked before allocations and submissions; may throw to stop bootstrap.
   void setOperationGuard(std::function<void()> guard);
@@ -326,6 +329,17 @@ public:
                                              std::string_view label = {});
   [[nodiscard]] MetalBuffer view(const MetalBuffer &base, uint64_t offsetBytes,
                                  uint64_t lengthBytes) const;
+
+  // Metal wires a buffer only while a command uses it and a few seconds
+  // after, so memory pressure can drop idle weights and the next request
+  // reads them from disk again. A kept buffer (the base allocation of a view)
+  // is wired from here on until the keep-alive passes without a command, and
+  // again from the next command, until the allocation's last view is gone.
+  // Keeping a buffer twice throws.
+  void keepResident(const MetalBuffer &buffer);
+  // The kept bytes whose residency the keep-alive has ended, until the next
+  // command holds them again; Metal unwires them shortly after the end.
+  [[nodiscard]] uint64_t lapsedResidentBytes() const noexcept;
 
   // Encodes exactly one compute dispatch, commits it, waits for completion,
   // and reports both GPU and end-to-end wall time.
