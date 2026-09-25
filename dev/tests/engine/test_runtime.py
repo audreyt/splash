@@ -1396,6 +1396,28 @@ class RuntimeTests(unittest.TestCase):
         finally:
             runtime.close()
 
+    def test_kill_ends_a_close_waiting_for_engine_teardown(self):
+        waiting = threading.Event()
+
+        class SlowTeardown(FakeProcess):
+            def terminate(self):
+                pass  # Still releasing its memory; SIGTERM only asked it to.
+
+            def wait(self, timeout=None):
+                waiting.set()
+                return super().wait(timeout)
+
+        process = SlowTeardown(1000)
+        self.addCleanup(process.kill)
+        runtime = engine_runtime.MultiplexedRuntime(process_factory=lambda: process)
+        closing = threading.Thread(target=runtime.close)
+        closing.start()
+        self.assertTrue(waiting.wait(1.0))
+        runtime.kill()
+        closing.join(1.0)
+        self.assertFalse(closing.is_alive())
+        self.assertEqual(process.poll(), -9)
+
     def test_kill_fallback_ends_an_engine_that_survives_terminate(self):
         class StubbornProcess(FakeProcess):
             def terminate(self):

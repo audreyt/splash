@@ -3470,6 +3470,7 @@ class ServerTest(unittest.TestCase):
         tokenizer = object()
         handlers = {}
         order = []
+        closing_handlers = []
 
         def install(signum, handler):
             if handler is api._interrupt:
@@ -3477,7 +3478,10 @@ class ServerTest(unittest.TestCase):
                 return signal.SIG_DFL
             handlers[signum] = handler
             self.assertIn(signum, (signal.SIGTERM, signal.SIGINT))
-            self.assertEqual(handler, signal.SIG_IGN)
+            if handler is not signal.SIG_IGN:
+                self.assertEqual(signum, signal.SIGINT)
+
+        backend.close.side_effect = lambda: closing_handlers.append(dict(handlers))
 
         def serve():
             self.assertEqual(set(handlers), {signal.SIGTERM, signal.SIGINT})
@@ -3514,6 +3518,12 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(
             handlers, {signal.SIGTERM: signal.SIG_IGN, signal.SIGINT: signal.SIG_IGN}
         )
+        # While the engine releases its memory, a second Ctrl+C stops it now.
+        (closing,) = closing_handlers
+        self.assertIs(closing[signal.SIGTERM], signal.SIG_IGN)
+        runtime.kill.assert_not_called()
+        closing[signal.SIGINT](signal.SIGINT, None)
+        runtime.kill.assert_called_once_with()
         runtime_type.assert_called_once_with(
             [
                 "splash",

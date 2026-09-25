@@ -1971,6 +1971,7 @@ def _interrupt(_signum, _frame):
 def main():
     args = parse_args()
     server = None
+    runtime = None
     backend = None
     # A server started in the background from a non-interactive shell inherits
     # SIGINT as ignored and Python then leaves it alone; install both stop
@@ -2068,14 +2069,20 @@ def main():
         pass
     finally:
         # main owns this process. Keep stop signals idempotent through child
-        # cleanup and interpreter teardown, including after this function returns.
+        # cleanup and interpreter teardown, including after this function
+        # returns, except that a second Ctrl+C during cleanup stops the engine
+        # without waiting for its paced release of memory.
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(
+            signal.SIGINT,
+            signal.SIG_IGN if runtime is None else lambda *_: runtime.kill(),
+        )
         try:
             if backend is not None:
                 print_status("Stopping · releasing engine resources")
                 backend.close()
         finally:
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
             if server is not None:
                 server.server_close()
 

@@ -708,6 +708,18 @@ class MultiplexedRuntime:
             self._ready_message = None
         self._mask_executor.shutdown(wait=True, cancel_futures=True)
 
+    def kill(self) -> None:
+        """SIGKILL the engine now, skipping its paced teardown.
+
+        Safe in a signal handler: close() may be waiting for that teardown.
+        """
+        process = self._process
+        if process is not None:
+            try:
+                process.kill()
+            except OSError:
+                pass
+
     def _request_protocol_error(
         self, request_id: int, issue: wire.ProtocolIssue
     ) -> EngineRuntimeError:
@@ -1382,8 +1394,7 @@ class MultiplexedRuntime:
         # Bound the child's exit time before escalating to SIGKILL.
         try:
             process.wait(timeout=self._shutdown_grace_seconds)
-        except (OSError, subprocess.TimeoutExpired, TimeoutError, KeyboardInterrupt):
-            # A second Ctrl+C during the grace means "stop now".
+        except (OSError, subprocess.TimeoutExpired, TimeoutError):
             try:
                 process.kill()
             except OSError:
