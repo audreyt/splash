@@ -594,8 +594,12 @@ PreparedInput Linear::add(metal::CommandGraph &graph, LinearBuffers b,
   requireBytes(b.scratch.counters, scratch.counters, "counters");
   if (p.layout() == WeightLayout::Block32) {
     addGguf(graph, b, p, selected, gate, stats);
-    return selected.input() == LinearInput::Plain ? b.prepared
-                                                  : PreparedInput{b.input, selected.input()};
+    // Only quantized segments run the plan's tile: float segments alone
+    // leave the scratch table as it was.
+    const std::vector<QuantizedSegment> &segments = p.blocks().segments;
+    const bool tiled =
+        std::any_of(segments.begin(), segments.end(), [](const QuantizedSegment &s) { return !s.isFloat(); });
+    return tiled && selected.input() != LinearInput::Plain ? PreparedInput{b.input, selected.input()} : b.prepared;
   }
   requireAffineProjection(p, w.matrix);
   if (gate) requireAffineProjection(*gate, w.matrix);

@@ -70,6 +70,7 @@ using splash::ops::LinearPlan;
 using splash::ops::LinearScratch;
 using splash::ops::LinearScratchSize;
 using splash::ops::Linear;
+using splash::ops::PreparedInput;
 using splash::ops::Projection;
 using splash::ops::WeightLayout;
 using namespace gguf_reference;
@@ -338,6 +339,45 @@ int floatSegments(MetalBackend &backend, uint32_t floatColumns) {
   }
   printf("float segment: fused Q8_0|Q4_K|F32 (%u float columns) decode B1-4 (register, staged) and prefill "
          "1/24/33/263 rows, both float tiles %s\n", floatColumns, failures ? "FAIL" : "ok");
+  return failures;
+}
+
+// A projection of float segments alone runs no quantized kernel, so it leaves
+// the scratch table as it found it: an Apple9 register plan chained after it
+// on the same input (as the draft chains its head and selector) prepares its
+// own table and writes what it writes alone, bit for bit.
+int floatOnlyChain(MetalBackend &backend) {
+  constexpr uint32_t K = 1024, N = 256;
+  const Tensor gates = floating(backend, N, K, 0.05f), q4k = quantized(backend, Q4K, N, K);
+  const Projection floats(N, K, splash::ops::BlockWeights{{gates.segment}});
+  const Projection blocks(N, K, splash::ops::BlockWeights{{q4k.segment}});
+  DeviceCapabilities device = backend.capabilities();
+  device.appleGpuFamily = 9;
+  const Linear linear(device);
+  int failures = 0;
+  for (uint32_t lanes = 1; lanes <= 4; ++lanes) {
+    const uint64_t rows = lanes * 8, bytes = rows * N * 2;
+    const LinearScratchSize size = linear.decodePlan(blocks, lanes).scratchSize();
+    const LinearScratch scratch{zeros(backend, size.input, "chain-table"), zeros(backend, size.sums, "chain-sums"),
+                                zeros(backend, size.partials, "chain-partials"),
+                                zeros(backend, size.counters, "chain-counters")};
+    const MetalBuffer input = bfloatBuffer(backend, activations(rows * K), "chain-input");
+    const MetalBuffer scores = zeros(backend, bytes, "chain-scores"), chained = zeros(backend, bytes, "chain-output"),
+                      alone = zeros(backend, bytes, "chain-reference");
+    splash::ops::LinearDispatchStats stats;
+    CommandGraph graph, reference;
+    const PreparedInput prepared = linear.addDecodeBatch(graph, input, floats, scores, lanes, stats, scratch);
+    static_cast<void>(linear.addDecodeBatch(graph, input, blocks, chained, lanes, stats, scratch, prepared));
+    static_cast<void>(backend.submitCommand(graph.dispatches()));
+    static_cast<void>(linear.addDecodeBatch(reference, input, blocks, alone, lanes, stats, scratch));
+    static_cast<void>(backend.submitCommand(reference.dispatches()));
+    if (std::memcmp(chained.contents(), alone.contents(), bytes)) {
+      printf("  float-only projection B%u: a register plan chained after it read another table FAIL\n", lanes);
+      ++failures;
+    }
+  }
+  printf("float-only projection: a register plan chained after it prepares its own table, B1-4 %s\n",
+         failures ? "FAIL" : "ok");
   return failures;
 }
 
@@ -619,8 +659,8 @@ int main(int argc, const char *argv[]) {
     }
     try {
       MetalBackend backend(argv[1]);
-      const int failures =
-          floatProjection(backend) + floatSegments(backend, 64) + floatSegments(backend, 96) + moe(backend);
+      const int failures = floatProjection(backend) + floatSegments(backend, 64) + floatSegments(backend, 96) +
+                           floatOnlyChain(backend) + moe(backend);
       if (failures) {
         std::cerr << "gguf_moe_test: " << failures << " failures\n";
         return 1;
