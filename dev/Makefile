@@ -25,8 +25,8 @@ publish-test:
 		--repo "$(TEST_RELEASE_REPO)"
 
 ENGINE_PYTHON_TEST_PATTERN ?= test_*.py
-# Comma-separated subset of claude,opencode,codex,hermes for the real client
-# gates on a machine that lacks one of them; empty runs all four.
+# Comma-separated subset of claude,opencode,codex,hermes,pi for the real client
+# gates on a machine that lacks one of them; empty runs all five.
 AGENT_CLIENTS ?=
 AGENT_CLIENT_ARGS = $(if $(AGENT_CLIENTS),--clients $(AGENT_CLIENTS),)
 # smoke: implement and resume; complete adds compaction and cancellation.
@@ -113,7 +113,7 @@ agent-preflight: model-selection install-development
 test-agent-real: preflight $(TARGET) agent-preflight verify-build-identity
 	TRANSFORMERS_VERBOSITY=error $(PYTHON) dev/tests/agent_real.py $(AGENT_ARGS)
 
-# The release path loads the model once for generic HTTP and all four official
+# The release path loads the model once for generic HTTP and all five official
 # clients. The individual targets remain useful while diagnosing one surface.
 test-release-real: preflight $(TARGET) agent-preflight verify-build-identity
 	TRANSFORMERS_VERBOSITY=error $(PYTHON) dev/tests/agent_real.py $(AGENT_ARGS) \

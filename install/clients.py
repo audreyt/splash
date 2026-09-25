@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +19,7 @@ INSTALL_URLS = {
     "opencode": "https://opencode.ai/docs/",
     "codex": "https://developers.openai.com/codex/cli/",
     "hermes": "https://hermes-agent.nousresearch.com/docs/getting-started/installation/",
+    "pi": "https://pi.dev/",
 }
 # The most tokens a client reserves for one response out of the window.
 MAX_RESPONSE_TOKENS = 32768
@@ -130,6 +132,8 @@ def command(
             argv = _codex(path, server, environment, client_args)
         case "hermes":
             argv = _hermes(path, server, environment, client_args, runtime_dir)
+        case "pi":
+            argv = _pi(path, server, environment, client_args)
         case _:
             raise ClientError(f"Unknown coding client: {name}")
     return argv, environment
@@ -342,12 +346,74 @@ def _write_hermes_profile(home, server):
         # compaction threshold; do not inherit a cloud model's output cap.
         max_tokens=server.response_tokens,
     )
-    # Replace only after the complete profile is ready; two launching shells
-    # never expose a partially written YAML file to Hermes.
-    with tempfile.NamedTemporaryFile(mode="w", dir=home, delete=False) as output:
+    _replace_file(path, yaml.safe_dump(profile, sort_keys=False))
+
+
+def _pi(path, server, environment, arguments):
+    # Pi reads custom providers only from models.json in its agent directory,
+    # beside the user's sessions, settings and extensions. Replace this
+    # server's provider there and leave everything else as it is: splash for
+    # the default port, 8000, and splash-<port> for another, so a Pi session
+    # keeps the server it was started for.
+    port = urllib.parse.urlsplit(server.base_url).port
+    provider = "splash" if port == 8000 else f"splash-{port}"
+    _write_pi_provider(_pi_models_path(environment), provider, server, environment)
+    return [path, "--provider", provider, "--model", server.model, *arguments]
+
+
+def _pi_models_path(environment):
+    agent = environment.get("PI_CODING_AGENT_DIR")
+    directory = Path(agent).expanduser() if agent else Path.home() / ".pi/agent"
+    return directory / "models.json"
+
+
+def _write_pi_provider(path, provider, server, environment):
+    # Write through a symlinked models.json, as dotfile managers link it.
+    path = path.resolve()
+    invalid = f"Invalid Pi models.json: {path}"
+    try:
+        config = json.loads(path.read_text()) if path.exists() else {}
+    except ValueError as error:
+        raise ClientError(invalid) from error
+    providers = config.get("providers", {}) if isinstance(config, dict) else None
+    if not isinstance(providers, dict):
+        raise ClientError(invalid)
+    # Pi expands the variable for each request. The server's key is never
+    # saved, nor run as a command when it begins with "!".
+    api_key = "$SPLASH_API_KEY" if environment.get("SPLASH_API_KEY") else "local"
+    # Pi accepts only text and image input; any other entry invalidates the
+    # user's whole models.json.
+    vision = "image" in server.input_modalities
+    model = {
+        "id": server.model,
+        "reasoning": True,
+        # Pi sends no effort when thinking is off, which leaves the
+        # template's default; "none" turns thinking off.
+        "thinkingLevelMap": {"off": "none"},
+        "input": ["text", "image"] if vision else ["text"],
+        "contextWindow": server.context,
+        "maxTokens": server.response_tokens,
+    }
+    config["providers"] = {
+        **providers,
+        provider: {
+            "baseUrl": server.endpoint,
+            "api": "openai-completions",
+            "apiKey": api_key,
+            "models": [model],
+        },
+    }
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _replace_file(path, json.dumps(config, indent=2) + "\n")
+
+
+def _replace_file(path, text):
+    """Replace path only once text is complete: two launching shells never
+    expose a partially written configuration to the client."""
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as output:
         temporary = Path(output.name)
         try:
-            yaml.safe_dump(profile, output, sort_keys=False)
+            output.write(text)
             output.close()
             temporary.replace(path)
         finally:

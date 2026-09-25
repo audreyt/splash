@@ -2,6 +2,7 @@ import http.server
 import io
 import json
 import os
+import secrets
 import signal
 import subprocess
 import tempfile
@@ -25,6 +26,13 @@ class ClientTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.runtime = Path(directory.name)
+        # Pi's default models.json is in the home directory; no launch here
+        # touches the developer's.
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        self.home = Path(home.name)
+        self.enterContext(mock.patch.dict(os.environ, {"HOME": home.name}))
+        self.pi_models = self.home / ".pi/agent/models.json"
 
     def command(
         self,
@@ -67,6 +75,14 @@ class ClientTests(unittest.TestCase):
                     self.assertEqual(
                         config["provider"]["splash"]["options"]["apiKey"],
                         "test-server-key",
+                    )
+                elif name == "pi":
+                    # Pi reads the key from the environment for each request.
+                    self.assertEqual(env["SPLASH_API_KEY"], "test-server-key")
+                    self.assertNotIn("test-server-key", self.pi_models.read_text())
+                    config = json.loads(self.pi_models.read_text())
+                    self.assertEqual(
+                        config["providers"]["splash"]["apiKey"], "$SPLASH_API_KEY"
                     )
                 else:
                     self.assertEqual(env["OPENAI_API_KEY"], "test-server-key")
@@ -304,6 +320,133 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(home.stat().st_mode & 0o777, 0o700)
         self.assertEqual({path.name for path in home.iterdir()}, {"config.yaml"})
 
+    def test_pi_launch_adds_the_served_model_to_the_users_pi_models(self):
+        argv, env = self.command("pi", env={"PATH": "/bin"})
+        self.assertEqual(argv, ["/bin/pi", "--provider", "splash", "--model", MODEL])
+        self.assertEqual(env, {"PATH": "/bin"})
+        self.assertEqual(
+            json.loads(self.pi_models.read_text()),
+            {
+                "providers": {
+                    "splash": {
+                        "baseUrl": "http://127.0.0.1:8000/v1",
+                        "api": "openai-completions",
+                        "apiKey": "local",
+                        "models": [
+                            {
+                                "id": MODEL,
+                                "reasoning": True,
+                                "thinkingLevelMap": {"off": "none"},
+                                "input": ["text", "image"],
+                                "contextWindow": 102400,
+                                "maxTokens": 25600,
+                            }
+                        ],
+                    }
+                }
+            },
+        )
+        agent = self.pi_models.parent
+        self.assertEqual(agent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(self.pi_models.stat().st_mode & 0o777, 0o600)
+        self.assertEqual([path.name for path in agent.iterdir()], ["models.json"])
+        self.assertEqual(list(self.runtime.iterdir()), [])
+
+    def test_pi_names_a_provider_per_port(self):
+        self.command("pi")
+        argv, _ = clients.command(
+            "pi",
+            "/bin/pi",
+            "http://127.0.0.1:8001/",
+            MODEL,
+            102400,
+            self.runtime,
+            {},
+            input_modalities=["text"],
+        )
+        self.assertEqual(argv[:3], ["/bin/pi", "--provider", "splash-8001"])
+        providers = json.loads(self.pi_models.read_text())["providers"]
+        self.assertEqual(
+            {name: provider["baseUrl"] for name, provider in providers.items()},
+            {
+                "splash": "http://127.0.0.1:8000/v1",
+                "splash-8001": "http://127.0.0.1:8001/v1",
+            },
+        )
+
+    def test_pi_models_follow_the_agent_directory_setting(self):
+        self.command("pi", env={"PI_CODING_AGENT_DIR": "~/custom agent"})
+        path = self.home / "custom agent/models.json"
+        self.assertEqual(
+            json.loads(path.read_text())["providers"]["splash"]["models"][0]["id"],
+            MODEL,
+        )
+        self.assertFalse(self.pi_models.exists())
+
+    def test_pi_update_replaces_only_the_splash_provider(self):
+        agent = self.pi_models.parent
+        agent.mkdir(parents=True)
+        other = {"baseUrl": "http://other/v1", "models": [{"id": "keep"}]}
+        self.pi_models.write_text(
+            json.dumps(
+                {
+                    "providers": {"other": other, "splash": {"baseUrl": "stale"}},
+                    "future": {"keep": True},
+                }
+            )
+        )
+        for name in ("settings.json", "auth.json"):
+            (agent / name).write_text('{"keep": true}')
+        self.command("pi")
+        self.command("pi", context=262144, model="incoai/Qwen3.8-27B-Splash")
+        config = json.loads(self.pi_models.read_text())
+        self.assertEqual(config["providers"]["other"], other)
+        self.assertEqual(config["future"], {"keep": True})
+        splash = config["providers"]["splash"]
+        self.assertEqual(splash["baseUrl"], "http://127.0.0.1:8000/v1")
+        self.assertEqual(
+            [(m["id"], m["contextWindow"], m["maxTokens"]) for m in splash["models"]],
+            [("incoai/Qwen3.8-27B-Splash", 262144, 32768)],
+        )
+        for name in ("settings.json", "auth.json"):
+            self.assertEqual((agent / name).read_text(), '{"keep": true}')
+        self.assertEqual(
+            {path.name for path in agent.iterdir()},
+            {"models.json", "settings.json", "auth.json"},
+        )
+
+    def test_invalid_pi_models_are_not_overwritten(self):
+        self.pi_models.parent.mkdir(parents=True)
+        for models in (
+            b"broken",
+            b"[]",
+            b"null",
+            b'{"providers": []}',
+            b'{"providers": null}',
+            # Pi strips comments; rewriting the file would drop them.
+            b'{"providers": {}} // mine\n',
+            b"\xff",
+        ):
+            self.pi_models.write_bytes(models)
+            with (
+                self.subTest(models=models),
+                self.assertRaisesRegex(clients.ClientError, "Invalid Pi models.json"),
+            ):
+                self.command("pi")
+            self.assertEqual(self.pi_models.read_bytes(), models)
+
+    def test_pi_updates_a_symlinked_models_file_in_place(self):
+        dotfiles = self.home / "dotfiles"
+        dotfiles.mkdir()
+        (dotfiles / "models.json").write_text('{"providers": {}}')
+        self.pi_models.parent.mkdir(parents=True)
+        self.pi_models.symlink_to(dotfiles / "models.json")
+        self.command("pi")
+        self.assertTrue(self.pi_models.is_symlink())
+        config = json.loads((dotfiles / "models.json").read_text())
+        self.assertEqual(config["providers"]["splash"]["models"][0]["id"], MODEL)
+        self.assertEqual([path.name for path in dotfiles.iterdir()], ["models.json"])
+
     def test_opencode_preserves_unrelated_inline_config(self):
         user = {
             "permission": {"bash": "ask"},
@@ -405,6 +548,13 @@ class ClientTests(unittest.TestCase):
                 profile = Path(env["HERMES_HOME"]) / "config.yaml"
                 config = yaml.safe_load(profile.read_text())
                 self.assertIs(config["model"]["supports_vision"], vision)
+                # Pi's schema has no PDF input.
+                self.command("pi", input_modalities=modalities)
+                config = json.loads(self.pi_models.read_text())
+                self.assertEqual(
+                    config["providers"]["splash"]["models"][0]["input"],
+                    ["text", "image"] if vision else ["text"],
+                )
         # Claude Code and Codex configurations declare no input modalities.
         for name in ("claude", "codex"):
             with self.subTest(name=name):
@@ -624,6 +774,19 @@ class ClientTests(unittest.TestCase):
                 self.assertEqual(configured.pop("model")["default"], MODEL)
                 self.assertEqual(configured, kept)
 
+    def test_failed_profile_replacement_keeps_the_previous_profile(self):
+        home = self.runtime / "hermes"
+        home.mkdir()
+        path = home / "config.yaml"
+        path.write_text("display: {interface: tui}\n")
+        with (
+            mock.patch.object(Path, "replace", side_effect=OSError("disk full")),
+            self.assertRaisesRegex(OSError, "disk full"),
+        ):
+            self.command("hermes")
+        self.assertEqual(path.read_text(), "display: {interface: tui}\n")
+        self.assertEqual(list(home.iterdir()), [path])
+
     def test_no_client_filters_tools_bypasses_permissions_or_changes_cwd(self):
         cwd = Path.cwd()
         original = {"PATH": "/bin", "USER_SETTING": "keep"}
@@ -705,7 +868,7 @@ class ClientTests(unittest.TestCase):
             self.command("codex", client_args=["exec", "-c"])
 
     def test_other_clients_preserve_passthrough_arguments(self):
-        for name in ("claude", "opencode", "hermes"):
+        for name in ("claude", "opencode", "hermes", "pi"):
             with self.subTest(name=name):
                 args = ["--help", "--", "literal"]
                 argv, _ = self.command(name, client_args=args)
@@ -1242,6 +1405,121 @@ class InstalledCodexTests(unittest.TestCase):
                                 for tool in body.get("tools", [])
                             )
                         )
+
+
+@unittest.skipUnless(
+    os.environ.get("SPLASH_PI_BINARY"), "set SPLASH_PI_BINARY for Pi HTTP test"
+)
+class InstalledPiTests(unittest.TestCase):
+    def test_text_tools_and_session_resume_against_splash_http(self):
+        from dev.tests.agent_real import events, executed_commands
+        from dev.tests.test_server import (
+            FakeRuntime,
+            FakeTokenizer,
+            Harness,
+            Plan,
+            _byte_backend,
+        )
+
+        # The installed client and production HTTP adapter are real; the
+        # controlled runtime answers with one tool call, then plain text.
+        tokenizer = FakeTokenizer()
+        tokenizer.fragments[5] = (
+            "<tool_call>\n<function=bash>\n<parameter=command>\n"
+            "printf 'pi-tool-ok'\n</parameter>\n</function>\n</tool_call>\n"
+        )
+        tokenizer.backend_tokenizer = _byte_backend(tokenizer.fragments)
+        runtime = FakeRuntime(Plan([[5]]), Plan([[4]]), Plan([[26, 4]]))
+        # A key Pi would run as a command or expand if it were saved.
+        api_key = "!test-$" + secrets.token_hex(16)
+        harness = Harness(
+            runtime,
+            tokenizer=tokenizer,
+            max_context=131072,
+            timeout=60,
+            api_key=api_key,
+        )
+        self.addCleanup(harness.close)
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            environment = {
+                key: os.environ[key] for key in ("PATH", "TMPDIR") if key in os.environ
+            }
+            environment.update(
+                HOME=directory,
+                PI_CODING_AGENT_DIR=str(work / "pi"),
+                PI_OFFLINE="1",
+                PI_TELEMETRY="0",
+                SPLASH_API_KEY=api_key,
+            )
+            argv, environment = clients.command(
+                "pi",
+                os.environ["SPLASH_PI_BINARY"],
+                f"http://127.0.0.1:{harness.server.server_port}",
+                "test-model",
+                131072,
+                work / "runtime",
+                environment,
+                input_modalities=["text", "image", "pdf"],
+                client_args=[
+                    "--print",
+                    "--mode",
+                    "json",
+                    "--no-extensions",
+                    "--no-skills",
+                    "--no-prompt-templates",
+                    "--no-themes",
+                    "--no-context-files",
+                    "--thinking",
+                    "off",
+                ],
+            )
+            self.assertNotIn(api_key, (work / "pi/models.json").read_text())
+            session = None
+            for thinking in ("off", "low"):
+                result = subprocess.run(
+                    [
+                        *argv[:-1],
+                        thinking,
+                        *(["--session", session] if session else []),
+                    ],
+                    input="Reply briefly.\n",
+                    cwd=work,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=45,
+                )
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 0, output)
+                parsed = events(result.stdout)
+                header = next(e for e in parsed if e.get("type") == "session")
+                if session:
+                    self.assertEqual(header["id"], session)
+                session = header["id"]
+                messages = [
+                    e["message"]
+                    for e in parsed
+                    if e.get("type") == "message_end"
+                    and e.get("message", {}).get("role") == "assistant"
+                ]
+                self.assertTrue(messages, output)
+                self.assertEqual(messages[-1]["stopReason"], "stop", output)
+                self.assertIn(
+                    "plain answer",
+                    [c.get("text", "").strip() for c in messages[-1]["content"]],
+                    output,
+                )
+                if thinking == "off":
+                    self.assertEqual(
+                        executed_commands("pi", parsed), ["printf 'pi-tool-ok'"]
+                    )
+            self.assertEqual(len(runtime.requests), 3)
+            # Thinking off reaches the template as reasoning_effort "none".
+            self.assertEqual(
+                [options["enable_thinking"] for _, options in tokenizer.templates],
+                [False, False, True],
+            )
 
 
 if __name__ == "__main__":
