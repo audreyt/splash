@@ -1312,6 +1312,55 @@ void testPressureReclaimRespectsStateLifetimes() {
           "critical pressure left evictable cached state or KV backing");
 }
 
+// A request starts only in a free state cell. While every cell is resident,
+// a waiting request is recorded as a concurrency wait without another cache
+// probe or admission attempt, and, as after a failed attempt, a memory wait
+// it was in no longer counts against the resource wait limit.
+void testFullStateCellsSkipAdmissionAttempts() {
+  Backing backing(64);
+  KvPool pool(backing);
+  engine::Cache resources(pool, CacheNamespace{});
+  Executor executor;
+  executor.decodeFinishes = false;
+  // Request 4 is the last of the first four admissions and meets pressure.
+  executor.beginGrowthBlocked = [&] { return executor.beginAttempts == 4; };
+  Events events;
+  engine::Engine engine({.resourceWaitTimeoutMilliseconds = 1000.0},
+                        resources, executor, events);
+  const auto submit = [&](uint64_t id, uint32_t promptTokens) {
+    auto value = request(id, std::vector<uint32_t>(promptTokens, id));
+    value.maxNewTokens = 100'000;
+    value.deadlineMilliseconds = 100'000;
+    engine.submit(std::move(value));
+  };
+  for (uint64_t id = 1; id <= 4; ++id)
+    submit(id, id == 4 ? 64 : 33);
+  require(engine.tick(1) && engine.resourceWaitSnapshot(1).memory == 1,
+          "fixture did not leave one request waiting for memory");
+  submit(5, 33);
+  for (double now = 2; now <= 6; ++now)
+    static_cast<void>(engine.tick(now));
+  require(executor.requests.size() == 4 && executor.beginAttempts == 5,
+          "fixture did not make every state cell resident");
+
+  for (double now : {200.0, 201.0, 1200.0, 1201.0})
+    static_cast<void>(engine.tick(now));
+  const auto waiting = engine.resourceWaitSnapshot(1201);
+  require(executor.beginAttempts == 5 && events.failedCount == 0 &&
+              waiting.concurrency == 1 && waiting.memory == 0,
+          "full state cells retried admission or kept the memory wait limit");
+  engine.cancel(1);
+  require(engine.tick(1202) && executor.beginAttempts == 6 &&
+              events.startIds.back() == 4,
+          "a released state cell did not admit the waiting request");
+  for (uint64_t id : {2, 3, 4, 5})
+    engine.cancel(id);
+  for (double now = 1203; now < 1220 && !engine.idle(); ++now)
+    static_cast<void>(engine.tick(now));
+  require(engine.idle() && resources.snapshot().activeRequests == 0,
+          "full state cell fixture leaked its lanes");
+}
+
 void testConcurrencyLimitDoesNotEvictCache() {
   Backing backing(256);
   KvPool pool(backing);
@@ -3409,6 +3458,7 @@ int main() {
     testKvGrowthReclaimsIdleStateBeforeCache();
     testKvGrowthDenialKeepsEveryLaneReplayState();
     testPressureReclaimRespectsStateLifetimes();
+    testFullStateCellsSkipAdmissionAttempts();
     testConcurrencyLimitDoesNotEvictCache();
     testHostPressureDoesNotDrainCacheOnStateAdmission();
     testHostPressureStillRecyclesLruStateForDeniedSnapshot();

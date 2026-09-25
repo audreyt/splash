@@ -326,11 +326,23 @@ bool Engine::admitQueued(double now) {
     return false;
   }
 
+  // A request starts only in a free state cell. While every cell is
+  // resident, record each wait as a failed admission would, without hashing
+  // the waiting prompts again.
+  const bool cellsFull =
+      std::count_if(requests_.begin(), requests_.end(), [](const auto &entry) {
+        return entry.second.stateCell.has_value();
+      }) >= model::ExecutionLimits::maximumBatchWidth;
   std::vector<PrefillAdmission> candidates;
   for (uint64_t id : order) {
     Request &active = request(id);
     if (!resourceRetryReady(active, now))
       continue;
+    if (cellsFull) {
+      scheduler_.waitForResources(id);
+      deferResourceRetry(active, now, StateFailure::ConcurrencyLimit);
+      continue;
+    }
     active.admissionProbe =
         cache_.probe(active.request.prompt, active.request.images);
     const uint32_t cached = active.admissionProbe->cachedTokens();
