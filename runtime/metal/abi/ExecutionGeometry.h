@@ -17,9 +17,9 @@
 #define SPLASH_PREFILL_ATTENTION_TILE_ROWS 8u
 #define SPLASH_PREFILL_ATTENTION_MAXIMUM_SPLITS 32u
 #define SPLASH_VERIFY_ATTENTION_SPLITS 32u
-// Verify attention starts from the configured split count and adds one split
-// per this many visible Page32 blocks, capped at the maximum that sizes the
-// partial workspace.
+// Verify attention runs one split per this many visible Page32 blocks, at
+// least the configured split count and at most the maximum that sizes the
+// partial workspace (ops::q8VerifyAttentionSplits).
 #define SPLASH_VERIFY_ATTENTION_PAGES_PER_SPLIT 16u
 #define SPLASH_VERIFY_ATTENTION_MAXIMUM_SPLITS 128u
 #define SPLASH_TARGET_SAMPLING_SHARDS 16u

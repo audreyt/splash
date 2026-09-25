@@ -79,10 +79,10 @@ inline uint gdn_output_head(uint head, bool tiled) {
 }
 
 // Gated RMSNorm of the recurrent rows, one task per (token, value head) and
-// one lane per dimension, stored at the head's output position. Decode walks
-// a lane's rows persistently; prefill dispatches one task per threadgroup.
-// The norm weights are read in their stored type W: bfloat in the packed
-// formats, float for a GGUF's F32 norms.
+// one lane per dimension, stored at the head's output position. Prefill
+// dispatches one task per threadgroup; decode runs gdn_decode_gate, which
+// reproduces these rows bitwise. The norm weights are read in their stored
+// type W: bfloat in the packed formats, float for a GGUF's F32 norms.
 template <uint KeyHeads, uint ValueHeads, uint HeadDim, uint ConvDim,
           uint Simdgroups = 8, class W>
 inline void
