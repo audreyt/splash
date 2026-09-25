@@ -792,10 +792,9 @@ struct Runtime::Impl {
     uint32_t capturedRows = 0;
   };
 
-  MetalBuffer prefillU16(PrefillTensor tensor, uint32_t begin, uint32_t rows,
-                         uint32_t width) const {
-    return backend.view(prefillArena->get(tensor),
-                        bytesFor<uint16_t>(uint64_t{begin} * width),
+  MetalBuffer prefillU16(const MetalBuffer &tensor, uint32_t begin,
+                         uint32_t rows, uint32_t width) const {
+    return backend.view(tensor, bytesFor<uint16_t>(uint64_t{begin} * width),
                         bytesFor<uint16_t>(uint64_t{rows} * width));
   }
 
@@ -1023,7 +1022,7 @@ struct Runtime::Impl {
         geometry.target.kvLayout.attentionLayers);
     for (uint32_t layer = 0; layer < kvLayers.size(); ++layer)
       kvLayers[layer] = kvPages.layer(layer);
-    targetModel.addPrefill(
+    const MetalBuffer finalHidden = targetModel.addPrefill(
         graph, std::move(buffers),
         std::span(modelSequences).first(batch.sequences.size()), batch.rows,
         kvLayers);
@@ -1042,8 +1041,8 @@ struct Runtime::Impl {
       const uint32_t lastRows = std::min(item.tokenCount, kDecodeRows);
       ops::DraftAttention::gatherLastRows(
           graph,
-          prefillU16(PrefillTensor::Hidden0, sequence.rowBegin,
-                     item.tokenCount, geometry.target.hiddenSize),
+          prefillU16(finalHidden, sequence.rowBegin, item.tokenCount,
+                     geometry.target.hiddenSize),
           d(DecodeTensor::Hidden0), item.tokenCount,
           geometry.target.hiddenSize);
       if (scoring) {

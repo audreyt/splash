@@ -196,7 +196,7 @@ struct QwenTarget::VerifyStep {
   uint32_t attentionLayer = 0;
 };
 
-void QwenTarget::addPrefill(
+metal::MetalBuffer QwenTarget::addPrefill(
     metal::CommandGraph &graph, QwenTargetPrefillBuffers buffers,
     std::span<const QwenTargetPrefillSequence> sequences, uint32_t rows,
     std::span<const kv::LayerStorage> kvLayers) const {
@@ -235,6 +235,7 @@ void QwenTarget::addPrefill(
     }
   }, weights_);
   requireLayerPartition(geometry_, step.gdnLayer, step.attentionLayer);
+  return buffers.hidden[geometry_.layers & 1];
 }
 
 // An affine prefill projection reads the Q4 input sums of its rows, which the
