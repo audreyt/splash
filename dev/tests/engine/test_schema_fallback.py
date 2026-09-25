@@ -421,6 +421,44 @@ class SchemaFallbackTests(unittest.TestCase):
             tool_schema.tool_grammar(self.policy({"$ref": "#/$defs/missing"}), False)
         self.assertEqual(caught.exception.status, 400)
 
+    def test_schemas_validation_cannot_evaluate_are_request_errors(self):
+        # Draft 4 leaves $ref unchecked and draft 3 accepts any type name;
+        # validating an output against either failed with an internal error.
+        for draft, value in (
+            ("draft-04", {"$ref": None}),
+            ("draft-04", {"$ref": 5}),
+            ("draft-03", {"type": "x"}),
+            ("draft-03", {"type": ["string", "x"]}),
+            ("draft-03", {"disallow": "x"}),
+        ):
+            schema = {
+                "$schema": f"http://json-schema.org/{draft}/schema#",
+                "type": "object",
+                "properties": {"value": value},
+            }
+            tools = [
+                {"type": "function", "function": {"name": "t", "parameters": schema}}
+            ]
+            response_format = {"type": "json_schema", "json_schema": {"schema": schema}}
+            for normalize in (
+                lambda: tool_schema.normalize_tools(tools, None, None),
+                lambda: tool_schema.normalize_response_format(response_format),
+            ):
+                with (
+                    self.subTest(value=value),
+                    self.assertRaises(api.APIError) as caught,
+                ):
+                    normalize()
+                self.assertEqual(caught.exception.status, 400)
+        schema = {
+            "$schema": "http://json-schema.org/draft-03/schema#",
+            "properties": {"value": {"type": ["any", {"type": "string"}]}},
+        }
+        _, validator = tool_schema.normalize_response_format(
+            {"type": "json_schema", "json_schema": {"schema": schema}}
+        )
+        self.assertTrue(validator.is_valid({"value": 1}))
+
     def test_unchecked_keywords_of_older_dialects_are_request_errors(self):
         # An older declared dialect leaves newer keywords unchecked, so they
         # can hold any value. That is the client's schema error, not a crash.

@@ -139,8 +139,15 @@ def _remote_ref(schema):
             if "$schema" in node and not isinstance(node["$schema"], str):
                 raise APIError(400, "$schema must be a string")
             for key in ("$ref", "$dynamicRef", "$recursiveRef"):
-                ref = node.get(key)
-                if isinstance(ref, str) and not ref.startswith("#"):
+                if key not in node:
+                    continue
+                # Draft 4 leaves $ref unchecked, and validation fails on
+                # anything but a string with an error that is not a
+                # validation error.
+                ref = node[key]
+                if not isinstance(ref, str):
+                    raise APIError(400, f"{key} must be a string")
+                if not ref.startswith("#"):
                     return ref
     return None
 

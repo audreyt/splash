@@ -8,6 +8,7 @@ from functools import lru_cache
 
 import regex
 from jsonschema import ValidationError, validators
+from jsonschema.exceptions import UndefinedTypeCheck
 
 if __package__:
     from .errors import APIError
@@ -73,6 +74,14 @@ def json_objects(value):
             pending.extend(value)
 
 
+def _known_type(base, name):
+    try:
+        base.TYPE_CHECKER.is_type(None, name)
+    except UndefinedTypeCheck:
+        return False
+    return True
+
+
 @lru_cache(maxsize=8)
 def _bounded_class(base):
     return validators.extend(
@@ -107,6 +116,16 @@ def build_validator(schema, nodes, registry):
             return cached[2]
     base = validators.validator_for(schema)
     base.check_schema(schema)
+    # Draft 3 accepts any type name, and validation fails on one the dialect
+    # does not define with an error that is not a validation error.
+    for node in nodes(schema):
+        if not isinstance(node, dict):
+            continue
+        for keyword in ("type", "disallow"):
+            names = node.get(keyword)
+            for name in names if isinstance(names, list) else (names,):
+                if isinstance(name, str) and not _known_type(base, name):
+                    raise APIError(400, f"unknown schema type: {name}")
     # jsonschema matches patternProperties with the unbounded standard-library
     # engine to find the properties unevaluatedProperties applies to. A
     # reference can reach any object, so one document cannot use both.
