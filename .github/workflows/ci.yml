@@ -11,6 +11,11 @@ on:
         required: false
         type: boolean
         default: false
+      expect_output_change:
+        description: Allow outputs that differ from the baseline's, with acceptance within 0.02 (EXPECT_OUTPUT_CHANGE=1)
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: runtime-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
@@ -76,6 +81,7 @@ jobs:
       # For the private draft repository.
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       PYTHON_CANDIDATES: python3
+      EXPECT_OUTPUT_CHANGE: ${{ inputs.expect_output_change && '1' || '' }}
     # Older Apple GPUs can spend substantially longer in the real context and
     # quality gates. The job must fail on an engine/test result, not an
     # arbitrary job timer.
