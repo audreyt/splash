@@ -27,13 +27,15 @@ class HttpRegressionTests(unittest.TestCase):
             "incoai/Qwen3.8-27B-Splash",
             "incoai/Qwen3.6-35B-A3B-Splash",
             "community/custom-splash",
+            "mlx-community/Qwen3.8-27B-4bit",
+            "unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M",
         ):
             with self.subTest(model=selected):
                 arguments = smoke.parse_args(["--model", selected])
                 self.assertEqual(arguments.model, selected)
                 self.assertEqual(
                     arguments.package,
-                    smoke.model_artifacts.installed_root(
+                    smoke.model_artifacts.selection_link(
                         smoke.model_artifacts.MODELS, selected
                     ),
                 )
@@ -52,29 +54,64 @@ class HttpRegressionTests(unittest.TestCase):
                     with self.assertRaises(SystemExit):
                         parse(arguments)
 
-    def test_benchmark_resolves_the_selected_model_package(self):
-        model = "incoai/Qwen3.6-35B-A3B-Splash"
+    def test_benchmark_runs_any_installation_and_holds_its_assembly(self):
         with TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             binary = root / "splash"
             binary.touch()
             (root / "splash.metallib").touch()
-            package = root / "models" / model
-            (package / "tokenizer").mkdir(parents=True)
-            (package / "manifest.json").write_text("{}")
-            with mock.patch.object(smoke.model_artifacts, "MODELS", root / "models"):
-                arguments = benchmark.parse_args(
-                    [
-                        "--model",
-                        model,
-                        "--binary",
-                        str(binary),
-                        "--baseline-binary",
-                        str(binary),
-                    ]
-                )
-            self.assertEqual(arguments.model, model)
-            self.assertEqual(arguments.package, package)
+            models = root / "models"
+            # A Splash package records manifest.json; an upstream selection
+            # links an assembly that records model.json.
+            legacy = "incoai/Qwen3.6-35B-A3B-Splash"
+            (models / legacy).mkdir(parents=True)
+            (models / legacy / "manifest.json").write_text("{}")
+            upstream = "unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M"
+            assembly = models / ".resolved/assembly"
+            assembly.mkdir(parents=True)
+            (assembly / "model.json").write_text("{}")
+            (models / upstream).parent.mkdir(parents=True)
+            (models / upstream).symlink_to(assembly, target_is_directory=True)
+
+            def parse(model):
+                with mock.patch.object(smoke.model_artifacts, "MODELS", models):
+                    return benchmark.parse_args(
+                        [
+                            "--model",
+                            model,
+                            "--binary",
+                            str(binary),
+                            "--baseline-binary",
+                            str(binary),
+                        ]
+                    )
+
+            def hold(arguments):
+                with mock.patch.object(smoke.model_artifacts, "MODELS", models):
+                    smoke.hold_package(arguments)
+
+            arguments = parse(legacy)
+            self.assertEqual(arguments.package, models / legacy)
+            hold(arguments)
+            self.assertEqual(
+                (arguments.package, arguments.held_record), (models / legacy, None)
+            )
+            # Parsing only names the selection link; the servers' run holds it.
+            arguments = parse(upstream)
+            self.assertEqual(arguments.package, models / upstream)
+            self.assertFalse(smoke.assembly.is_held(assembly))
+            hold(arguments)
+            try:
+                # Installations collect an unlinked assembly unless it is held.
+                self.assertEqual(arguments.package, assembly)
+                self.assertTrue(smoke.assembly.is_held(assembly))
+            finally:
+                arguments.held_record.close()
+            self.assertFalse(smoke.assembly.is_held(assembly))
+            error = io.StringIO()
+            with contextlib.redirect_stderr(error), self.assertRaises(SystemExit):
+                parse("community/not-installed")
+            self.assertIn("missing installed model", error.getvalue())
 
     def row(self, version, sample=0, latency=10):
         return {

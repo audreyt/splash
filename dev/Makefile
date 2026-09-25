@@ -59,11 +59,11 @@ test-python: install-development
 	$(PYTHON) -m unittest discover -s dev/tests/engine -p '$(ENGINE_PYTHON_TEST_PATTERN)'
 	$(PYTHON) -m unittest dev/tests/test_server.py
 
-# Installer, model manifest and prepared-weight identity tests; none
-# downloads or loads real weights.
+# Installer, model manifest, upstream resolution, GGUF metadata and
+# prepared-weight identity tests; none downloads or loads real weights.
 test-models: install-development
-	$(PYTHON) -m unittest dev/tests/test_models.py \
-		dev/tests/test_weight_preparation_identity.py
+	$(PYTHON) -m unittest dev/tests/test_models.py dev/tests/test_upstream.py \
+		dev/tests/test_weight_preparation_identity.py dev/tests/test_gguf_metadata.py
 
 check-python-engine: install-development test-python test-models
 	$(PYTHON) -m compileall -q server install/*.py \

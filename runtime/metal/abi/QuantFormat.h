@@ -13,7 +13,9 @@
 // (dev/tools/weight_preparation_identity.py): it holds what defines prepared
 // bytes, plus each format's kernel name token, which the host reads.
 // Editing this file re-prepares every GGUF model.
-// The decode-only value tables are in metal/abi/QuantTables.h.
+// dev/tests/test_gguf_metadata.py reads the GGUF type of each kQuantFormats
+// row with a regex on the row's leading number. The decode-only value tables
+// are in metal/abi/QuantTables.h.
 //
 // Inside a group of 32 the elements are in lane-owned chunk order: chunk c
 // (0..3) holds elements 4c..4c+3 and 16+4c..16+4c+3 as pairs p = 0..3, pair p

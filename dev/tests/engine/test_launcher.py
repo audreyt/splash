@@ -1,3 +1,4 @@
+import contextlib
 import fcntl
 import io
 import json
@@ -16,6 +17,12 @@ from unittest import mock
 from install import launcher
 
 MODEL_ID = "community/custom-splash"
+
+
+def selection(models_root, **options):
+    return launcher.model_artifacts.Selection.of(models_root, MODEL_ID, **options)
+
+
 MODEL_IDS = (
     "incoai/Qwen3.8-27B-Splash",
     "incoai/Qwen3.6-35B-A3B-Splash",
@@ -192,7 +199,7 @@ class LauncherTests(unittest.TestCase):
                 "port": launcher.PORT,
             }
 
-            def check_install(model):
+            def check_install(chosen):
                 self.assertEqual(json.loads(lock_path.read_text()), owner)
 
             def check_exec(binary, argv, environment):
@@ -262,7 +269,7 @@ class LauncherTests(unittest.TestCase):
                         "proxy.local",
                     ]
                 )
-            install.assert_called_once_with(MODEL_ID)
+            install.assert_called_once_with(selection(launcher.paths.MODELS))
             execute.assert_called_once()
             self.assertEqual(
                 {p.name for p in runtime.iterdir()}, {"serve.lock", "serve-8000.lock"}
@@ -533,8 +540,8 @@ class LauncherTests(unittest.TestCase):
                 "launcher.ROOT = Path(sys.argv[1])\n"
                 "launcher.RUNTIME_DIR = launcher.ROOT / 'runtime'\n"
                 "launcher.paths.PYTHON = Path(sys.executable)\n"
-                "launcher._ensure_installed = lambda model: None\n"
-                "launcher.model_artifacts.installed_root = lambda *args: launcher.ROOT\n"
+                "launcher._ensure_installed = lambda selection: None\n"
+                "launcher.model_artifacts.selection_link = lambda *a, **k: launcher.ROOT\n"
                 "launcher.catalog.spawn_refresh = lambda: None\n"
                 "launcher.main(['serve', '--model', 'test/model', '--port', sys.argv[2]])\n"
             )
@@ -587,7 +594,14 @@ class LauncherTests(unittest.TestCase):
                 payload = (
                     {"maximum_context_tokens": 102400}
                     if self.path == "/status"
-                    else {"data": [{"id": MODEL_ID, "owned_by": "splash"}]}
+                    else {
+                        "data": [
+                            {
+                                "id": MODEL_ID,
+                                "owned_by": "splash",
+                            }
+                        ]
+                    }
                 )
                 body = json.dumps(payload).encode()
                 self.send_response(200)
@@ -675,12 +689,153 @@ class LauncherTests(unittest.TestCase):
                         with self.assertRaisesRegex(
                             launcher.LauncherError, "source build failed"
                         ):
-                            launcher._ensure_installed(MODEL_ID)
+                            launcher._ensure_installed(selection(runtime))
                     else:
-                        launcher._ensure_installed(MODEL_ID)
+                        launcher._ensure_installed(selection(runtime))
                 self.assertEqual(len(calls), 1 if fail else 3)
                 with (runtime / "build.lock").open("a+") as probe:
                     fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_source_selection_reaches_installation_and_served_root(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            draft = runtime / "local-draft"
+            draft.mkdir()
+            options = {
+                "revision": "v2",
+                "language_only": False,
+                "draft_model": str(draft.resolve()),
+            }
+            with (
+                mock.patch.object(launcher, "RUNTIME_DIR", runtime),
+                mock.patch.object(launcher.socket, "socket"),
+                mock.patch.object(launcher.catalog, "spawn_refresh"),
+                mock.patch.object(launcher, "_ensure_installed") as install,
+                mock.patch.object(
+                    launcher.model_artifacts,
+                    "selection_link",
+                    return_value=runtime / "selected",
+                ) as root,
+                mock.patch.object(launcher.os, "execve") as execute,
+            ):
+                launcher.main(
+                    [
+                        "serve",
+                        "--model",
+                        MODEL_ID,
+                        "--revision",
+                        "v2",
+                        "--draft-model",
+                        str(draft),
+                    ]
+                )
+            (chosen,) = install.call_args.args
+            self.assertEqual(
+                (chosen.model, chosen.link),
+                (MODEL_ID, runtime / "selected"),
+            )
+            root.assert_called_once_with(chosen.models_root, MODEL_ID, **options)
+            argv = execute.call_args.args[1]
+            self.assertEqual(
+                argv[3:5],
+                [str(runtime / "selected/target"), str(runtime / "selected/draft")],
+            )
+
+            with (
+                mock.patch.object(
+                    launcher.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess([], 0),
+                ) as run,
+                mock.patch.object(launcher.paths, "PACKAGED", True),
+            ):
+                launcher._ensure_installed(chosen)
+            command = run.call_args.args[0]
+            self.assertEqual(run.call_args.kwargs["cwd"], launcher.ROOT)
+            parsed = launcher.model_artifacts.parse_args(command[2:])
+            self.assertEqual(
+                (
+                    parsed.command,
+                    parsed.model,
+                    parsed.revision,
+                    parsed.draft_model,
+                ),
+                ("prepare", MODEL_ID, "v2", options["draft_model"]),
+            )
+
+    def test_server_holds_the_assembly_it_serves(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            assembly = runtime / "models/.resolved/assembly"
+            assembly.mkdir(parents=True)
+            (assembly / "model.json").write_text("{}")
+            selection = runtime / "models/owner/model"
+            selection.parent.mkdir()
+            selection.symlink_to(assembly)
+            held = []
+
+            def execute(program, argv, environment):
+                # Installations remove no assembly a server holds.
+                with (assembly / "model.json").open("rb") as record:
+                    try:
+                        fcntl.flock(record, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        held.append(argv[3])
+
+            with (
+                mock.patch.object(launcher, "RUNTIME_DIR", runtime),
+                mock.patch.object(launcher.paths, "MODELS", runtime / "models"),
+                mock.patch.object(launcher.socket, "socket"),
+                mock.patch.object(launcher.catalog, "spawn_refresh"),
+                mock.patch.object(launcher, "_ensure_installed"),
+                mock.patch.object(
+                    launcher.model_artifacts, "selection_link", return_value=selection
+                ),
+                mock.patch.object(launcher.os, "execve", side_effect=execute),
+            ):
+                launcher.main(["serve", "--model", MODEL_ID])
+            self.assertEqual(held, [str(assembly.resolve() / "target")])
+
+    def test_relative_draft_directory_is_resolved_for_the_installer(self):
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            contextlib.chdir(temporary),
+        ):
+            base = Path(temporary).resolve()
+            (base / "drafts/local").mkdir(parents=True)
+            for value in ("drafts/local", "./drafts/local", "drafts/../drafts/local"):
+                with self.subTest(value=value):
+                    args = launcher.parse_args(
+                        ["serve", "--model", MODEL_ID, "--draft-model", value]
+                    )
+                    self.assertEqual(args.draft_model, str(base / "drafts/local"))
+                    # The installer, run directly, records the same directory.
+                    args = launcher.model_artifacts.parse_args(
+                        ["--model", MODEL_ID, "--draft-model", value, "prepare"]
+                    )
+                    self.assertEqual(args.draft_model, str(base / "drafts/local"))
+            repository = "incoai/Qwen3.8-27B-DFlash2"
+            args = launcher.parse_args(
+                ["serve", "--model", MODEL_ID, "--draft-model", repository]
+            )
+            self.assertEqual(args.draft_model, repository)
+            for value in ("./missing", "missing", "", "drafts/local/../../missing/"):
+                with (
+                    self.subTest(value=value),
+                    mock.patch.object(launcher, "_ensure_installed") as install,
+                    mock.patch("sys.stderr", io.StringIO()) as error,
+                    self.assertRaises(SystemExit) as failed,
+                ):
+                    launcher.main(
+                        ["serve", "--model", MODEL_ID, "--draft-model", value]
+                    )
+                self.assertEqual(failed.exception.code, 2)
+                self.assertIn(
+                    "argument --draft-model: must be a local DFlash2 draft "
+                    "directory or a Hugging Face repository ID",
+                    error.getvalue(),
+                )
+                install.assert_not_called()
 
     def test_packaged_serve_never_invokes_make_or_system_python(self):
         with (
@@ -691,7 +846,7 @@ class LauncherTests(unittest.TestCase):
                 return_value=subprocess.CompletedProcess([], 0),
             ) as run,
         ):
-            launcher._ensure_installed(MODEL_ID)
+            launcher._ensure_installed(selection(launcher.paths.MODELS))
         run.assert_called_once()
         command = run.call_args.args[0]
         self.assertEqual(command[0], str(launcher.paths.PYTHON))

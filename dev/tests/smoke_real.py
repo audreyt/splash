@@ -21,6 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from install import assembly  # noqa: E402
 from install import models as model_artifacts  # noqa: E402
 
 
@@ -1041,7 +1042,7 @@ def add_server_arguments(parser):
         type=Path,
         help="installed model package root (target, draft and tokenizer)",
     )
-    parser.add_argument("--model", type=model_artifacts.parse_repo_id, required=True)
+    parser.add_argument("--model", type=model_artifacts.parse_model_id, required=True)
     parser.add_argument("--max-context", type=int)
     parser.add_argument("--max-memory")
     parser.add_argument("--kv-format", choices=("int8", "bf16"), default="int8")
@@ -1049,11 +1050,22 @@ def add_server_arguments(parser):
 
 
 def resolve_server_arguments(arguments):
+    """Serve --package, or else the selection link of --model."""
     if arguments.package is None:
-        arguments.package = model_artifacts.installed_root(
+        arguments.package = model_artifacts.selection_link(
             model_artifacts.MODELS, arguments.model
         )
     return arguments
+
+
+def hold_package(arguments):
+    """As splash serve does, serve every server this process starts, and its
+    tokenizer, from one assembly, which installations keep while it is held:
+    point arguments.package at the assembly it links now, held until the
+    process exits by arguments.held_record (None for a legacy package)."""
+    arguments.package, arguments.held_record = assembly.hold(
+        arguments.package, model_artifacts.MODELS
+    )
 
 
 def parse_args(argv=None):
@@ -1064,6 +1076,7 @@ def parse_args(argv=None):
 
 def main(argv=None) -> int:
     arguments = parse_args(argv)
+    hold_package(arguments)
     server = RealServer(arguments)
     try:
         validate_status(

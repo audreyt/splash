@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import re
 import sqlite3
 import subprocess
 import tempfile
@@ -174,16 +175,66 @@ class AgentRunnerTests(unittest.TestCase):
         self.assertIn('--model "$(MODEL)" --http-smoke', makefile)
         self.assertIn('--model "$(MODEL)" $(HTTP_SMOKE_ARGS)', makefile)
 
-    def test_model_is_required_and_only_canonical_ids_are_accepted(self):
-        for arguments in ([], ["--preflight-only"], ["--model", "qwen3.8-27b"]):
+    def test_native_make_gates_run_the_installers_selection_link(self):
+        # MODEL_ROOT repeats the installer's layout; a GGUF variant's link is
+        # where the two could disagree.
+        model = "unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M"
+        artifacts = agent.launcher.model_artifacts
+        link = str(
+            artifacts.selection_link(artifacts.MODELS, model).relative_to(agent.ROOT)
+        )
+        for target, tools in (
+            ("test-real", ("vision-encoder", "model-runtime-oracle")),
+            ("test-performance-real", ("backend-benchmark",)),
+        ):
+            with self.subTest(target=target):
+                commands = subprocess.run(
+                    ["make", "-n", target, f"MODEL={model}"],
+                    cwd=agent.ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+                roots = re.findall(
+                    r'engine-tests/(\S+) \S+splash\.metallib "?([^"\s]+)', commands
+                )
+                self.assertEqual(dict(roots), dict.fromkeys(tools, link))
+
+    def test_model_is_required(self):
+        for arguments in ([], ["--preflight-only"]):
             with (
                 self.subTest(arguments=arguments),
                 contextlib.redirect_stderr(io.StringIO()),
             ):
                 with self.assertRaises(SystemExit):
                     agent.parse_args(arguments)
-        for model in MODEL_IDS:
-            self.assertEqual(agent.parse_args(["--model", model]).model, model)
+
+    def test_real_harnesses_accept_exactly_the_ids_splash_serve_accepts(self):
+        parsers = {
+            "splash serve": lambda model: agent.launcher.parse_args(
+                ["serve", "--model", model]
+            ),
+            "agent_real": lambda model: agent.parse_args(["--model", model]),
+            "smoke_real": lambda model: agent.smoke_real.parse_args(["--model", model]),
+        }
+        for model, served in (
+            *((model, True) for model in MODEL_IDS),
+            ("mlx-community/Qwen3.8-27B-4bit", True),
+            ("unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M", True),
+            ("unsloth/Qwen3.6-35B-A3B-GGUF:", False),
+            ("unsloth/Qwen3.6-35B-A3B-GGUF:UD/Q4_K_M", False),
+            ("qwen3.8-27b", False),
+        ):
+            for name, parse in parsers.items():
+                with (
+                    self.subTest(parser=name, model=model),
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
+                    if served:
+                        self.assertEqual(parse(model).model, model)
+                    else:
+                        with self.assertRaises(SystemExit):
+                            parse(model)
 
     def test_complete_phase_handles_auxiliary_cancellation_and_retains_failures(self):
         finished = [
@@ -454,7 +505,7 @@ class AgentRunnerTests(unittest.TestCase):
                     adapter.assert_called_once_with(
                         name,
                         runner.path,
-                        agent.launcher.BASE_URL,
+                        agent.BASE_URL,
                         "Actual-model",
                         102400,
                         agent.launcher.RUNTIME_DIR,
