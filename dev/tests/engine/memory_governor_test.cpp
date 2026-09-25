@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -36,6 +37,66 @@ namespace {
 void require(bool value, const std::string &message) {
   if (!value)
     throw std::runtime_error(message);
+}
+
+// Available host memory is what macOS can hand out without compressing or
+// swapping: free pages and pageable file-backed and purgeable pages.
+void testHostAvailabilityCountsReclaimablePages() {
+  constexpr uint64_t pageSize = 16384;
+  auto availablePages = [](const HostMemoryPages &pages) {
+    return estimateHostAvailableMemory(pages, pageSize) / pageSize;
+  };
+  // free_count includes the speculative pages; they are file-backed too.
+  HostMemoryPages pages{
+      .free = 15, .speculative = 5, .fileBacked = 35, .purgeable = 5};
+  require(availablePages(pages) == 50,
+          "host availability does not match macOS reclaimable accounting");
+  pages.free += 5;
+  pages.speculative += 5;
+  require(availablePages(pages) == 50,
+          "speculative file pages were counted twice");
+  pages.free -= 10;
+  require(availablePages(pages) == 40,
+          "anonymous or compressed pages did not consume capacity");
+  pages.purgeable = 0;
+  require(availablePages(pages) == 35,
+          "non-purgeable backing received reclaimable credit");
+  // Wired file pages leave external_page_count: GPU pinning must reduce
+  // available memory, rather than crediting hot weights for KV growth.
+  pages.fileBacked -= 10;
+  require(availablePages(pages) == 25,
+          "wired weights remained available for new allocations");
+
+  // Reading a file into clean cache does not require a second full copy
+  // when that same immutable file is mapped again on the next startup.
+  require(availablePages({.free = 75}) == 75 &&
+              availablePages({.free = 35, .fileBacked = 40}) == 75,
+          "cached weights reduced model reload capacity");
+  // A 64 GB M5 Pro, whose hw.memsize less its VM queues left 1.2 GiB more
+  // (the firmware carve-out, tag storage) that no allocation can have.
+  require(estimateHostAvailableMemory(
+              {.free = 2'349'632, .speculative = 90'428,
+               .fileBacked = 417'802, .purgeable = 23'495},
+              pageSize) == 44'245'008'384ULL,
+          "unexpected available memory for a 64 GB snapshot");
+  const uint64_t maximum = std::numeric_limits<uint64_t>::max();
+  require(estimateHostAvailableMemory({.free = maximum, .fileBacked = 1}, 1) ==
+                  0 &&
+              estimateHostAvailableMemory(
+                  {.fileBacked = maximum, .purgeable = 1}, 1) == 0 &&
+              estimateHostAvailableMemory({.free = maximum}, pageSize) == 0 &&
+              estimateHostAvailableMemory({.free = 1, .speculative = 2}, 1) ==
+                  0 &&
+              estimateHostAvailableMemory({.free = maximum}, 1) == maximum &&
+              estimateHostAvailableMemory(pages, 0) == 0,
+          "invalid host counters or arithmetic overflow did not fail closed");
+  require(EngineMemoryPolicy::hostAvailableReserveBytes(16 * kGiB) ==
+                  16 * kGiB / 10 &&
+              EngineMemoryPolicy::hostAvailableReserveBytes(48 * kGiB) ==
+                  2 * kGiB &&
+              EngineMemoryPolicy::hostAvailableReserveBytes(128 * kGiB) ==
+                  2 * kGiB,
+          "the macOS reserve is a tenth of a small machine, 2 GiB above 20 GiB");
 }
 
 // A Mac whose recommended working set is numerator/denominator of its memory,
@@ -147,6 +208,7 @@ void testAdvertisedContextIsGrantable() {
 
 int main() {
   try {
+    testHostAvailabilityCountsReclaimablePages();
     testAdvertisedContextIsGrantable();
     std::cout << "memory governor tests passed\n";
     return EXIT_SUCCESS;

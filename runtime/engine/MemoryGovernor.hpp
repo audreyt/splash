@@ -10,21 +10,20 @@
 namespace splash::engine {
 
 struct HostMemoryPages {
-  uint64_t active = 0;
-  uint64_t inactive = 0;
+  // Mach's free_count, which includes the speculative pages.
+  uint64_t free = 0;
   uint64_t speculative = 0;
-  uint64_t wired = 0;
-  uint64_t compressor = 0;
   uint64_t fileBacked = 0;
   uint64_t purgeable = 0;
 };
 
-// Physical memory minus used pages, crediting pageable file-backed and
-// purgeable pages regardless of active/inactive status. The governor also
-// enforces the engine budget, host reserve and system pressure.
+// The pages macOS can hand out without compressing or swapping: free pages
+// plus pageable file-backed and purgeable pages, regardless of
+// active/inactive status. Memory in no VM queue (the firmware carve-out, tag
+// storage) is never available. The governor also enforces the engine
+// budget, host reserve and system pressure.
 [[nodiscard]] uint64_t estimateHostAvailableMemory(
-    const HostMemoryPages &pages, uint64_t pageSize,
-    uint64_t physicalMemoryBytes) noexcept;
+    const HostMemoryPages &pages, uint64_t pageSize) noexcept;
 [[nodiscard]] std::optional<uint64_t> queryHostAvailableMemory() noexcept;
 
 enum class MemoryPressure : uint8_t {

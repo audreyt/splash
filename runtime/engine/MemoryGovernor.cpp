@@ -14,37 +14,20 @@
 namespace splash::engine {
 
 uint64_t estimateHostAvailableMemory(const HostMemoryPages &statistics,
-                                     uint64_t pageSize,
-                                     uint64_t physicalMemoryBytes) noexcept {
-  if (!pageSize || !physicalMemoryBytes) return 0;
+                                     uint64_t pageSize) noexcept {
+  // free_count includes the speculative pages, which external_page_count
+  // also counts; wired file pages are in neither.
+  if (!pageSize || statistics.speculative > statistics.free) return 0;
   const uint64_t maximum = std::numeric_limits<uint64_t>::max();
-  uint64_t usedPages = 0;
-  for (uint64_t pages : {statistics.active, statistics.inactive,
-                        statistics.speculative, statistics.wired,
-                        statistics.compressor}) {
-    if (pages > maximum - usedPages) return 0;
-    usedPages += pages;
+  uint64_t pages = statistics.free - statistics.speculative;
+  for (uint64_t reclaimable : {statistics.fileBacked, statistics.purgeable}) {
+    if (reclaimable > maximum - pages) return 0;
+    pages += reclaimable;
   }
-  // Mach's external_page_count excludes wired pages. Unlike free_count,
-  // these used-page categories do not already include speculative pages.
-  if (statistics.fileBacked > usedPages) return 0;
-  usedPages -= statistics.fileBacked;
-  if (statistics.purgeable > usedPages) return 0;
-  usedPages -= statistics.purgeable;
-  if (usedPages > maximum / pageSize) return 0;
-  const uint64_t usedBytes = usedPages * pageSize;
-  return usedBytes < physicalMemoryBytes ? physicalMemoryBytes - usedBytes : 0;
+  return pages <= maximum / pageSize ? pages * pageSize : 0;
 }
 
 std::optional<uint64_t> queryHostAvailableMemory() noexcept {
-  // Physical capacity is immutable; don't add a sysctl to every allocation.
-  static const uint64_t physicalMemoryBytes = [] {
-    uint64_t bytes = 0;
-    size_t size = sizeof(bytes);
-    return sysctlbyname("hw.memsize", &bytes, &size, nullptr, 0) == 0 &&
-                   size == sizeof(bytes) ? bytes : uint64_t{0};
-  }();
-  if (!physicalMemoryBytes) return std::nullopt;
   mach_port_t host = mach_host_self();
   vm_size_t pageSize = 0;
   vm_statistics64_data_t statistics{};
@@ -59,14 +42,11 @@ std::optional<uint64_t> queryHostAvailableMemory() noexcept {
   if (statisticsResult != KERN_SUCCESS || !pageSize) return std::nullopt;
 
   return estimateHostAvailableMemory(
-      {.active = statistics.active_count,
-       .inactive = statistics.inactive_count,
+      {.free = statistics.free_count,
        .speculative = statistics.speculative_count,
-       .wired = statistics.wire_count,
-       .compressor = statistics.compressor_page_count,
        .fileBacked = statistics.external_page_count,
        .purgeable = statistics.purgeable_count},
-      pageSize, physicalMemoryBytes);
+      pageSize);
 }
 
 std::optional<MemoryPressure> querySystemMemoryPressure() noexcept {
