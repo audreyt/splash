@@ -1,4 +1,5 @@
-DEV_STAMP := .venv/.dev-requirements-installed
+# Holds the hash of the development requirements last installed.
+DEV_STAMP = $(VENV)/.dev-requirements-installed
 RELEASE_VERSION ?= $(shell git describe --tags --always)
 
 .PHONY: package package-bottle package-check
@@ -39,16 +40,26 @@ HTTP_SMOKE_ARGS ?=
 
 .PHONY: agent-preflight architecture-check check check-source \
 	check-native-engine check-native-cpu check-native-metal check-python-engine \
-	install-development release-check test test-agent-real test-http-real \
-	test-performance-real test-release-real \
+	install-development _install-development release-check test \
+	test-agent-real test-http-real test-performance-real test-release-real \
 	test-models test-python test-real \
 	test-engine test-engine-cpu test-engine-metal test-sanitizers
 
-install-development: install-environment $(DEV_STAMP)
+# Decided by the stamp's content, as the environment is: a rebuilt
+# environment has no stamp, and under -j make may read the stamp's time
+# before install-environment rebuilds it.
+install-development: install-environment
+	@/usr/bin/lockf -k "$(INSTALL_LOCK)" $(MAKE) --no-print-directory \
+		-f "$(SPLASH_MAKEFILE)" _install-development
 
-$(DEV_STAMP): dev/requirements.txt | install-environment
-	$(PYTHON) -m pip install -r dev/requirements.txt
-	@shasum -a 256 dev/requirements.txt | awk '{print $$1}' > $(DEV_STAMP)
+_install-development:
+	@set -eu; \
+	hash=$$(shasum -a 256 dev/requirements.txt | awk '{print $$1}'); \
+	if test "$$(cat "$(DEV_STAMP)" 2>/dev/null)" = "$$hash"; then \
+		exit 0; \
+	fi; \
+	"$(PYTHON)" -m pip install -r dev/requirements.txt; \
+	echo "$$hash" > "$(DEV_STAMP)"
 
 # Build production and run native tests that do not require model weights.
 check-native-engine: check-native-cpu check-native-metal
