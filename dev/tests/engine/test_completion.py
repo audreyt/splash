@@ -13,6 +13,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[3]
 COMPLETIONS = REPO / "install/completions"
 OFFICIAL = ("official/Model-A", "official/Model-B")
+SUGGESTED = ("suggested/Model-4bit",)
 LOCAL = ("community/custom-splash", "community/linked-splash")
 GGUF = ("unsloth/Model-GGUF:Q8_0", "unsloth/Model-GGUF:UD-Q4_K_M")
 UPSTREAM = (*GGUF, "mlx-community/Model-4bit")
@@ -77,6 +78,7 @@ class CompletionTests(unittest.TestCase):
         directory = root / "install/completions"
         shutil.copytree(COMPLETIONS, directory)
         (directory / "official-models.txt").write_text("\n".join(OFFICIAL) + "\n")
+        (directory / "suggested-models.txt").write_text("\n".join(SUGGESTED) + "\n")
         if release:
             (root / "release.json").write_text("{}")
             models = self.home / "Library/Application Support/Splash/models"
@@ -181,7 +183,8 @@ class CompletionTests(unittest.TestCase):
             with self.subTest(release=release):
                 _, directory = self.layout(str(release), release=release)
                 self.assertEqual(
-                    self.run_helper(directory), sorted((*OFFICIAL, *LOCAL, *UPSTREAM))
+                    self.run_helper(directory),
+                    sorted((*OFFICIAL, *SUGGESTED, *LOCAL, *UPSTREAM)),
                 )
                 self.assertEqual(self.run_helper(directory, "unsloth/"), list(GGUF))
                 self.assertEqual(self.run_helper(directory, "community/l"), [LOCAL[1]])
@@ -204,14 +207,15 @@ class CompletionTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     self.run_helper(directory),
-                    sorted((*OFFICIAL, *LOCAL, *UPSTREAM, "official/New")),
+                    sorted((*OFFICIAL, *SUGGESTED, *LOCAL, *UPSTREAM, "official/New")),
                 )
                 self.assertEqual(
                     self.run_helper(directory, "official/N"), ["official/New"]
                 )
                 cache.write_text("invalid\n")
                 self.assertEqual(
-                    self.run_helper(directory), sorted((*OFFICIAL, *LOCAL, *UPSTREAM))
+                    self.run_helper(directory),
+                    sorted((*OFFICIAL, *SUGGESTED, *LOCAL, *UPSTREAM)),
                 )
 
     def test_actual_bash_completion(self):
@@ -221,14 +225,14 @@ class CompletionTests(unittest.TestCase):
             (["splash", "co"], ["codex"]),
             (
                 ["splash", "serve", "--model", ""],
-                sorted((*OFFICIAL, *LOCAL, *UPSTREAM)),
+                sorted((*OFFICIAL, *SUGGESTED, *LOCAL, *UPSTREAM)),
             ),
             (["splash", "serve", "--model", "community/l"], [LOCAL[1]]),
             (["splash", "serve", "--model=community/l"], [LOCAL[1]]),
             (["splash", "serve", "--model", "=", "community/l"], [LOCAL[1]]),
             (
                 ["splash", "serve", "--model", "="],
-                sorted((*OFFICIAL, *LOCAL, *UPSTREAM)),
+                sorted((*OFFICIAL, *SUGGESTED, *LOCAL, *UPSTREAM)),
             ),
             (["splash", "serve", "--", "--model", ""], []),
             (["splash", "serve", "--max-context", ""], []),

@@ -56,8 +56,8 @@ Timed-out uploads return 408 and release their input reservation.
 Source `install/completions/splash.bash` for Bash or
 `install/completions/_splash` for Zsh after `compinit`. Completion suggests
 commands, the official model IDs (bundled, and as `splash serve` last refreshed
-them) and installed models, a GGUF's `OWNER/REPO:VARIANT` included, without
-network access.
+them), the upstream models the README starts with and installed models, a
+GGUF's `OWNER/REPO:VARIANT` included, without network access.
 
 ## Server configuration
 

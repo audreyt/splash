@@ -98,6 +98,7 @@ class PackageTests(unittest.TestCase):
                 "_splash",
                 "splash.bash",
                 "official-models.txt",
+                "suggested-models.txt",
             }
             for name in completion_names:
                 (completions / name).write_text(f"fixture {name}\n")

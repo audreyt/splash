@@ -33,7 +33,13 @@ INSTALL_FILES = (
     "catalog.py",
     "requirements.txt",
 )
-COMPLETION_FILES = ("models", "_splash", "splash.bash", "official-models.txt")
+COMPLETION_FILES = (
+    "models",
+    "_splash",
+    "splash.bash",
+    "official-models.txt",
+    "suggested-models.txt",
+)
 SERVER_FILES = (
     "__init__.py",
     "server.py",
