@@ -159,40 +159,6 @@ void testInstalledManifestBindsExecutionGeometry() {
   }
 }
 
-void testDescriptorRetainsInspectedManifestDigest() {
-  TemporaryModelRoot root, identicalRoot;
-  std::string manifest = executionManifest();
-  manifest.pop_back();
-  manifest += ",\"artifacts\":[{\"path\":\"target/shared.bin\",\"sha256\":\"" +
-              std::string(64, 'a') + "\"}]}";
-  root.write(manifest);
-  identicalRoot.write(manifest);
-  const auto inspected = model::inspectModelPackage(root.path());
-  const auto originalDigest = inspected.packageManifestSha256;
-  require(std::any_of(originalDigest.begin(), originalDigest.end(),
-                      [](uint8_t byte) { return byte != 0; }),
-          "inspected descriptor omitted its package manifest digest");
-  require(model::inspectModelPackage(root.path()).packageManifestSha256 == originalDigest &&
-              model::inspectModelPackage(identicalRoot.path()).packageManifestSha256 == originalDigest,
-          "identical manifest bytes produced different package digests");
-
-  std::string changedArtifact = manifest;
-  const size_t artifactDigest = changedArtifact.find(std::string(64, 'a'));
-  require(artifactDigest != std::string::npos, "test manifest lost its artifact digest");
-  changedArtifact[artifactDigest] = 'b';
-  root.write(changedArtifact);
-  require(model::inspectModelPackage(root.path()).packageManifestSha256 != originalDigest,
-          "package manifest digest omitted an artifact SHA-256 change");
-  require(inspected.packageManifestSha256 == originalDigest,
-          "rewriting a manifest changed an already inspected descriptor");
-
-  root.write(manifest + "\n");
-  require(model::inspectModelPackage(root.path()).packageManifestSha256 != originalDigest,
-          "package manifest digest did not identify the exact parsed bytes");
-  require(inspected.packageManifestSha256 == originalDigest,
-          "later raw manifest edits changed the loaded descriptor digest");
-}
-
 void testRuntimeCacheNamespaceBindsIdentityOnce() {
   constexpr kv::Layout kvLayout{16, 4, 256};
   const std::string combinedA(64, 'a');
@@ -807,7 +773,6 @@ int main() {
   try {
     testWarmupLaneComparisons();
     testInstalledManifestBindsExecutionGeometry();
-    testDescriptorRetainsInspectedManifestDigest();
     testRuntimeCacheNamespaceBindsIdentityOnce();
     testAllNativeWarmupsPrecedeReady();
     testBudgetLimitedWarmupKeepsRuntimeConcurrency();

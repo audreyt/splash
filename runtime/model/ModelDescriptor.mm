@@ -3,10 +3,7 @@
 
 #import <Foundation/Foundation.h>
 
-#include <CommonCrypto/CommonDigest.h>
-
 #include <array>
-#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -31,8 +28,7 @@ constexpr auto kExecutionGeometry = std::to_array<GeometryField>(
      {"target_verify_rows", ExecutionLimits::targetVerifyRows}});
 
 NSDictionary *readObject(const std::filesystem::path &path,
-                         std::string_view label,
-                         std::array<uint8_t, 32> *sha256 = nullptr) {
+                         std::string_view label) {
   NSString *nativePath = [NSString stringWithUTF8String:path.c_str()];
   if (!nativePath)
     throw std::invalid_argument(std::string(label) +
@@ -47,12 +43,6 @@ NSDictionary *readObject(const std::filesystem::path &path,
                                 ": " +
                                 (description ? description
                                              : "unknown read error"));
-  }
-  if (sha256) {
-    if (data.length > std::numeric_limits<CC_LONG>::max())
-      throw std::overflow_error(std::string(label) + " is too large to hash");
-    if (!CC_SHA256(data.bytes, static_cast<CC_LONG>(data.length), sha256->data()))
-      throw std::runtime_error(std::string(label) + " SHA-256 failed");
   }
   NSError *parseError = nil;
   id value = [NSJSONSerialization JSONObjectWithData:data
@@ -322,8 +312,7 @@ void requireNumbers(NSDictionary *object, std::initializer_list<GeometryField> f
 }
 
 ModelDescriptor inspectSourceModel(const std::filesystem::path &root) {
-  std::array<uint8_t, 32> identity{};
-  NSDictionary *record = readObject(root / "model.json", "resolved model", &identity);
+  NSDictionary *record = readObject(root / "model.json", "resolved model");
   requireEqual(requireUnsigned(record, @"version", "model record version"), 1, "model record version");
   NSDictionary *config = readObject(root / "config.json", "upstream model config");
   NSDictionary *text = requireObject(config, @"text_config", "text config");
@@ -394,7 +383,6 @@ ModelDescriptor inspectSourceModel(const std::filesystem::path &root) {
     NSArray *deepstack = requireArray(v, @"deepstack_visual_indexes", "vision deepstack layers");
     if (deepstack.count) throw std::invalid_argument("vision deepstack layers are unsupported");
   }
-  result.packageManifestSha256 = identity;
   if (!result.valid()) throw std::invalid_argument("incompatible target and draft model");
   return result;
 }
@@ -459,9 +447,7 @@ bool ModelDescriptor::valid() const noexcept {
 ModelDescriptor inspectModelPackage(const std::filesystem::path &root) {
   @autoreleasepool {
     if (std::filesystem::exists(root / "model.json")) return inspectSourceModel(root);
-    std::array<uint8_t, 32> packageManifestSha256{};
-    NSDictionary *manifest =
-        readObject(root / "manifest.json", "model manifest", &packageManifestSha256);
+    NSDictionary *manifest = readObject(root / "manifest.json", "model manifest");
     validateExecutionGeometry(manifest);
     const std::string model = requireString(manifest, @"model", "model name");
     const std::string format = requireString(
@@ -477,7 +463,6 @@ ModelDescriptor inspectModelPackage(const std::filesystem::path &root) {
     } else {
       throw std::invalid_argument("unsupported weight format: " + format);
     }
-    descriptor.packageManifestSha256 = packageManifestSha256;
     if (!descriptor.valid())
       throw std::logic_error("built-in model descriptor is inconsistent");
     return descriptor;
