@@ -73,8 +73,10 @@ KvPageAcquisition KvPool::acquirePages(uint32_t count, bool prefixOwner) {
     }
     if (!mapped) {
       returnSelected();
+      // Paced like reclaim: an extent the backing cannot release yet stays
+      // resident and reclaimable rather than waiting on the serving path.
       for (uint32_t resident : newlyResidentExtents) {
-        if (!extents_[resident].usedPages &&
+        if (!extents_[resident].usedPages && releaseReady() &&
             releaseBacking(extents_[resident].firstPage)) {
           setExtentResident(resident, false);
         }

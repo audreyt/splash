@@ -141,6 +141,31 @@ void testFailedGrowthRollsBackAtomically() {
             "failed physical growth leaked references or backing");
 }
 
+// A failed acquisition returns the extents it mapped the way reclaim does:
+// only while the backing is ready, so the rollback never waits behind an
+// in-flight release. The rest stay resident and reclaimable.
+void testFailedGrowthRollbackIsPaced() {
+    for (bool releaseInFlight : {false, true}) {
+        TestBacking backing(12, 4);
+        backing.failExtent = 2;
+        backing.pacedReleases = true;
+        backing.ready = !releaseInFlight;
+        KvPool pool(backing);
+        auto pages = pool.acquirePages(9, false);
+        const uint32_t released = releaseInFlight ? 0 : 1;
+        auto status = pool.snapshot();
+        require(!pages.granted() && backing.releasedExtents == released &&
+                    status.pagesResident == 4 * (2 - released) &&
+                    status.reclaimableExtents == 2 - released &&
+                    status.pagesFree == 12 && status.pagesActive == 0,
+                "allocation rollback released backing behind a release");
+        backing.ready = true;
+        require(pool.reclaimEmptyExtents(false) == 1 &&
+                    backing.releasedExtents == released + 1,
+                "rolled-back extent was not left to paced reclaim");
+    }
+}
+
 void testPressureReusesResidentPagesAndDeniesGrowth() {
     TestBacking backing(8, 4, 1);
     KvPool pool(backing);
@@ -320,6 +345,7 @@ int main() {
         testReleaseProgressIncludesAllocationRollback();
         testGrowthPacksResidentExtents();
         testFailedGrowthRollsBackAtomically();
+        testFailedGrowthRollbackIsPaced();
         testPressureReusesResidentPagesAndDeniesGrowth();
         testReleasesArePacedBehindTheBacking();
         testFullestExtentFillsFirstSoColdExtentsDrain();
