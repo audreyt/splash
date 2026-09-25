@@ -862,7 +862,7 @@ it runs once on each Mac. Per model, `release-check`:
   2% and twice the run's own ABBA spread, and a spread above 5% fails as
   inconclusive.
 
-Results go to `build/release/<owner>--<repo>[:VARIANT]/`. Preparation does not
+Results go to `build/release/<owner>--<repo>[--VARIANT]/`. Preparation does not
 depend on the GPU, so each model's `prepared.json` must be identical on the
 two Macs. The unpinned `verify-models`, run after the pinned ones while the
 default branch still names the pinned commit, resolves the branch online, and
@@ -887,7 +887,7 @@ make test-performance-real MODEL=mlx-community/Qwen3.8-27B-4bit BASELINE=/path/t
 
 The first characterizes this build: the decode widths B1-B4 and a 14,096-token
 partial-prefix request, three samples each, in
-`build/release/<owner>--<repo>[:VARIANT]/backend-benchmark.json`;
+`build/release/<owner>--<repo>[--VARIANT]/backend-benchmark.json`;
 `make benchmark-backend MODEL=...` adds the 2K to 128K contexts. The second
 compares this build with a retained checkout's in ABBA order, as the release
 check does ([Release check](#release-check)), and writes

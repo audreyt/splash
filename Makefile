@@ -26,8 +26,9 @@ MODEL_ARGS = --model "$(MODEL)" $(if $(REVISION),--revision "$(REVISION)") \
 MODEL_INSTALL = $(PYTHON) install/models.py $(MODEL_ARGS)
 # The installation's selection link, as the installer names it.
 MODEL_ROOT = $(if $(MODEL),$(shell $(MODEL_INSTALL) link))
-# Where the release targets record the model's results.
-MODEL_RESULTS = build/release/$(subst /,--,$(MODEL))
+# Where the release targets record the model's results. No ':' in the name:
+# CI's artifact upload refuses paths holding one.
+MODEL_RESULTS = build/release/$(subst :,--,$(subst /,--,$(MODEL)))
 
 BUILD := build
 TARGET := $(BUILD)/splash
