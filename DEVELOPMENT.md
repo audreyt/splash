@@ -816,19 +816,23 @@ and experiment notes out of the source tree and commits.
 ### Release check
 
 A release is checked once per source identity, and then on each Apple GPU
-family (an Apple9 M3 and an Apple10 M5) against the previous release's build,
-retained as `BASELINE`: a checkout whose `build/` holds `splash`,
-`splash.metallib` and `engine-tests/backend-benchmark`. `release-check` fails
-without it. From a clean checkout:
+family (an Apple9 M3 and an Apple10 M5) against a retained baseline build,
+`BASELINE`: a checkout whose `build/` holds `splash`, `splash.metallib` and
+`engine-tests/backend-benchmark`. `release-check` fails without it. The
+baseline must load the model: it is the previous release's build when that
+loads the model. Splash 1.0.x loads only Splash packages, so for 1.1, the
+first release that loads upstream models, an upstream model's baseline is a
+build of the last commit before the change under test; the legacy package can
+always be compared with 1.0.2. From a clean checkout:
 
 ```sh
 make check test-sanitizers                      # once, model-free
 make check-native-metal                         # once on each Mac
-make install release-check MODEL=mlx-community/Qwen3.8-27B-4bit REVISION=<commit> BASELINE=../splash-1.0.2
+make install release-check MODEL=mlx-community/Qwen3.8-27B-4bit REVISION=<commit> BASELINE=../splash-baseline
 make install release-check MODEL=unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M LANGUAGE_ONLY=1 REVISION=<commit> BASELINE=...
 make install release-check MODEL=mlx-community/Qwen3.6-35B-A3B-4bit REVISION=<commit> BASELINE=...
 make install release-check MODEL=unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M REVISION=<commit> BASELINE=...
-make release-check MODEL=incoai/Qwen3.8-27B-Splash BASELINE=...
+make install release-check MODEL=incoai/Qwen3.8-27B-Splash BASELINE=../splash-1.0.2
 make install verify-models MODEL=mlx-community/Qwen3.6-35B-A3B-4bit
 make test-agent-real MODEL=mlx-community/Qwen3.6-35B-A3B-4bit REVISION=<commit> AGENT_SCENARIO=smoke AGENT_CLIENTS=...
 ```
@@ -849,13 +853,14 @@ it runs once on each Mac. Per model, `release-check`:
   the installation loads (`verify-models`; a legacy package is only hashed);
 - runs the HTTP smoke, which for a text-only installation checks the 400s
   instead of images (`test-http-real`);
-- compares this build with `BASELINE` in ABBA order (`test-performance-real`):
-  output tokens and acceptance must be identical (`EXPECT_OUTPUT_CHANGE=1`
-  allows changed outputs with acceptance within 0.02), and so must the
-  prepared bytes, which a baseline of another preparation identity prepares
-  into a cache of its own; decode and prefill GPU time may regress by at most
-  the larger of 2% and twice the run's own ABBA spread, and a spread above 5%
-  fails as inconclusive.
+- compares this build with `BASELINE`, which must have another build
+  identity, in ABBA order (`test-performance-real`): output tokens and
+  acceptance must be identical (`EXPECT_OUTPUT_CHANGE=1` allows changed
+  outputs with acceptance within 0.02), and so must the prepared bytes,
+  which a baseline of another preparation identity prepares into a cache of
+  its own; decode and prefill GPU time may regress by at most the larger of
+  2% and twice the run's own ABBA spread, and a spread above 5% fails as
+  inconclusive.
 
 Results go to `build/release/<owner>--<repo>[:VARIANT]/`. Preparation does not
 depend on the GPU, so each model's `prepared.json` must be identical on the

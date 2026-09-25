@@ -106,10 +106,10 @@ test-release-real: preflight $(TARGET) agent-preflight verify-build-identity
 	TRANSFORMERS_VERBOSITY=error $(PYTHON) dev/tests/agent_real.py $(AGENT_ARGS) \
 		--http-smoke
 
-# BASELINE is a checkout whose build/ holds the previous release's
-# splash.metallib and engine-tests/backend-benchmark: this build is compared
-# with it on this machine in ABBA order (dev/benchmarks/backend_regression.py).
-# Without it, the release scenarios characterize this build alone.
+# BASELINE is a checkout whose build/ holds another build's splash.metallib
+# and engine-tests/backend-benchmark: this build is compared with it on this
+# machine in ABBA order (dev/benchmarks/backend_regression.py). Without it,
+# the release scenarios characterize this build alone.
 BASELINE ?=
 test-performance-real: preflight $(TARGET) $(TEST_BACKEND_BENCHMARK) $(LIB)
 	@mkdir -p "$(MODEL_RESULTS)"
@@ -132,13 +132,13 @@ else
 	@echo "native backend characterization: PASS ($(MODEL_RESULTS)/backend-benchmark.json)"
 endif
 
-# One model on this machine against BASELINE, the previous release's build
+# One model on this machine against BASELINE, a retained build that loads it
 # (DEVELOPMENT.md, Release check); make check and test-sanitizers run once per
 # source identity, check-native-metal and the agent clients once per machine.
 # verify-models follows test-real, whose load prepares the weights it records.
 release-check: preflight
 	@test -n "$(BASELINE)" || { \
-		echo "error: release-check compares with BASELINE, the previous release's build" >&2; \
+		echo "error: release-check compares with BASELINE, a retained build that loads the model" >&2; \
 		exit 1; \
 	}
 	@test -z "$$(git status --porcelain)" || { \
