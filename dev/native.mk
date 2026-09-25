@@ -1,7 +1,10 @@
 ENGINE_TEST_BUILD := $(BUILD)/engine-tests
 ENGINE_TEST_CXXFLAGS := -std=c++20 -O2 -Wall -Wextra -Werror -Iruntime -Idev \
 	$(MACOS_TARGET_FLAG)
-# Test kernels compile like production ones without the release optimizer.
+# Production flags less -O3, so Metal optimizes at its default -O2. With
+# metal 32023 the kernels built with them get the same AIR as at -O3, but
+# three production kernels do not (shared/gguf_linear, moe_gguf,
+# normalization): a test that recompiles those needs PROD_METALFLAGS.
 TEST_METALFLAGS := $(filter-out -O3,$(PROD_METALFLAGS))
 # Include the shared tools and production flags: some tests also link the
 # production library or metallib, and all share ENGINE_LINKFLAGS.
@@ -253,8 +256,9 @@ $(TEST_GGUF_PLANNER): dev/tests/engine/gguf_planner_test.mm $(ENGINE_LIBRARY) | 
 $(TEST_GGUF_PREPARATION): dev/tests/engine/gguf_preparation_test.mm $(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
 	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) $(ENGINE_LINKFLAGS) -o $@
 
-# Production flags, not TEST_METALFLAGS: gguf-dequant compares the shipped
-# dequantizer with GGML bitwise, and -O3 changes its AIR under Metal's fast math.
+# Production flags, not TEST_METALFLAGS: gguf-dequant checks the shipped
+# dequantizer bitwise, so it compiles as production does (its AIR does not
+# depend on -O3 with metal 32023, but that of some kernels does).
 $(TEST_GGUF_DEQUANT_AIR): dev/tests/engine/gguf_dequant_test.metal \
 		$(KERNEL_HEADERS) | $(ENGINE_TEST_BUILD)
 	$(RUN_CONFIGURED) $(METAL) $(PROD_METALFLAGS) -c $< -o $@
