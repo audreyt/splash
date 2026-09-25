@@ -759,7 +759,12 @@ A request holds at most 64 questions and 1M total prepared prompt tokens;
 larger batches are rejected before any inference.
 Questions run sequentially within a request under one shared deadline, allowing
 prefix reuse without filling the admission queue; independent HTTP requests still
-share the scheduler. Disconnects and timeouts cancel the current question.
+share the scheduler. When two or more question prompts share at least 256
+leading tokens, one score-only request over the shared tokens runs first, so
+every question resumes from its cached state. Otherwise the second question
+recomputes the shared prefix while the runtime saves state where the prompts
+diverge. That request is not counted in `usage`. Disconnects and timeouts
+cancel the current request.
 
 Preparation renders each prompt once, then enforces the context limit and the
 batch token budget before the per-slot boundary checks, which re-tokenize the

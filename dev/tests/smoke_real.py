@@ -1644,9 +1644,9 @@ def run_systemone_extensions(port: int, model: str, nonce: str) -> None:
     )
     print("system one legacy parity: PASS", flush=True)
 
-    # Shared-prefix reuse across questions over one long state. Observation
-    # for the legacy schedule; the extended schedule must reuse the state.
-    reuse = {}
+    # Shared-prefix reuse across questions over one long state. Both schedules
+    # warm the shared prefix once, so every question resumes from it.
+    reuse, submitted = {}, {}
     for label, extra in (("legacy", {}), ("extended", {"seed": 1})):
         before = counters(port)
         systemone(
@@ -1658,8 +1658,18 @@ def run_systemone_extensions(port: int, model: str, nonce: str) -> None:
                 **extra,
             },
         )
-        reuse[label] = counters(port)["reused_tokens"] - before["reused_tokens"]
-    require(reuse["extended"] > 0, f"extended questions reused no prefix: {reuse!r}")
+        after = counters(port)
+        reuse[label] = after["reused_tokens"] - before["reused_tokens"]
+        submitted[label] = after["submitted"] - before["submitted"]
+    expected = len(SYSTEMONE_ROUTING) + 1
+    require(
+        submitted == {"legacy": expected, "extended": expected},
+        f"the shared prefix was not warmed exactly once: {submitted!r}",
+    )
+    require(
+        reuse["extended"] > 0 and reuse["legacy"] >= 0.9 * reuse["extended"],
+        f"questions did not resume from the warmed prefix: {reuse!r}",
+    )
     print(
         "system one prefix reuse: PASS "
         f"(legacy reused {reuse['legacy']}, extended reused {reuse['extended']})",

@@ -99,6 +99,50 @@ def _longest_common_prefix(prompts):
     return length
 
 
+def warmup_job(frontend, jobs, priority, deadline, warmed=None):
+    """One score-only job over the jobs' shared token prefix, or None.
+
+    A published recurrent state lets the jobs resume past the shared prefill.
+    `warmed`, when given, deduplicates prefixes already warmed this request."""
+    if len(jobs) < 2:
+        return None
+    prompts = [job.prompt_tokens for job in jobs]
+    common = _longest_common_prefix(prompts)
+    if common < WARMUP_MIN_TOKENS or common >= min(len(tokens) for tokens in prompts):
+        return None
+    # A published recurrent state must contain every image span whole;
+    # partial images cannot be staged mid-prefix.
+    if not all(span.offset + span.tokens <= common for span in jobs[0].image_spans):
+        return None
+    key = tuple(prompts[0][:common])
+    if warmed is not None and key in warmed:
+        return None
+    slots = list(
+        dict.fromkeys(
+            frontend.tokenizer.encode(label, add_special_tokens=False)[0]
+            for label in judgments.slot_labels(frontend.tokenizer)
+        )
+    )
+    if len(slots) < 2:
+        # A phase without finite questions still needs two distinct
+        # score tokens; reuse the prefix's own in-vocabulary ids.
+        slots = list(dict.fromkeys(prompts[0][:common]))
+    if len(slots) < 2:
+        return None
+    if warmed is not None:
+        warmed.add(key)
+    return frontend._score_job(
+        prompts[0][:common],
+        slots[:2],
+        deadline,
+        priority,
+        None,
+        image_spans=jobs[0].image_spans,
+        image_pixels=jobs[0].image_pixels,
+        image_owner=jobs[0].image_owner,
+    )
+
+
 def _run_phase(frontend, run_jobs, entries, plan, warmed, deadline):
     """Submit one phase's jobs after prefix warm-ups. `entries` is a list of
     (job, family) and the runner returns results in the same order."""
@@ -107,46 +151,9 @@ def _run_phase(frontend, run_jobs, entries, plan, warmed, deadline):
         groups.setdefault(family, []).append(job)
     warmups = []
     for jobs in groups.values():
-        if len(jobs) < 2:
-            continue
-        prompts = [job.prompt_tokens for job in jobs]
-        common = _longest_common_prefix(prompts)
-        if common < WARMUP_MIN_TOKENS or common >= min(
-            len(tokens) for tokens in prompts
-        ):
-            continue
-        # A published recurrent state must contain every image span whole;
-        # partial images cannot be staged mid-prefix.
-        if not all(span.offset + span.tokens <= common for span in jobs[0].image_spans):
-            continue
-        key = tuple(prompts[0][:common])
-        if key in warmed:
-            continue
-        slots = list(
-            dict.fromkeys(
-                frontend.tokenizer.encode(label, add_special_tokens=False)[0]
-                for label in judgments.slot_labels(frontend.tokenizer)
-            )
-        )
-        if len(slots) < 2:
-            # A phase without finite questions still needs two distinct
-            # score tokens; reuse the prefix's own in-vocabulary ids.
-            slots = list(dict.fromkeys(prompts[0][:common]))
-        if len(slots) < 2:
-            continue
-        warmed.add(key)
-        warmups.append(
-            frontend._score_job(
-                prompts[0][:common],
-                slots[:2],
-                deadline,
-                plan.priority,
-                None,
-                image_spans=jobs[0].image_spans,
-                image_pixels=jobs[0].image_pixels,
-                image_owner=jobs[0].image_owner,
-            )
-        )
+        warmup = warmup_job(frontend, jobs, plan.priority, deadline, warmed)
+        if warmup is not None:
+            warmups.append(warmup)
     if warmups:
         for job, result in zip(warmups, run_jobs(warmups)):
             _result_or_raise(result, job)

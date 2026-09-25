@@ -9235,6 +9235,88 @@ class SystemOneExtensionTest(unittest.TestCase):
             time.sleep(0.02)
         self.assertEqual(runtime.cancel_count, 2)
 
+    def test_legacy_long_shared_prefix_gets_warmup(self):
+        runtime = FakeRuntime(
+            Plan(logits=(1.0, 2.0)),
+            Plan(logits=(3.0, 1.0)),
+            Plan(logits=(1.0, 3.0)),
+        )
+        harness = self.harness(runtime)
+        body = self.body(
+            {
+                "a": {"type": "noul", "instructions": "First?"},
+                "b": {"type": "noul", "instructions": "Second?"},
+            },
+            state="evidence " * 64,
+        )
+        status, _, payload = harness.request("POST", "/v1/systemone", body)
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(len(runtime.requests), 3)
+        warmup, first, second = runtime.requests
+        self.assertGreaterEqual(len(warmup.prompt_tokens), 256)
+        self.assertLess(len(warmup.prompt_tokens), len(first.prompt_tokens))
+        self.assertLess(len(warmup.prompt_tokens), len(second.prompt_tokens))
+        self.assertEqual(
+            first.prompt_tokens[: len(warmup.prompt_tokens)],
+            warmup.prompt_tokens,
+        )
+        self.assertEqual(
+            second.prompt_tokens[: len(warmup.prompt_tokens)],
+            warmup.prompt_tokens,
+        )
+        self.assertEqual(len(warmup.score_tokens), 2)
+        self.assertEqual(len(set(warmup.score_tokens)), 2)
+        response = json.loads(payload)
+        self.assertGreater(response["answers"]["a"]["noul"], 0.5)
+        self.assertLess(response["answers"]["b"]["noul"], 0.5)
+        self.assertEqual(
+            response["usage"],
+            {
+                "input_tokens": len(first.prompt_tokens) + len(second.prompt_tokens),
+                "output_tokens": 0,
+            },
+        )
+
+    def test_legacy_short_shared_prefix_skips_warmup(self):
+        runtime = FakeRuntime(
+            Plan(logits=(3.0, 1.0)),
+            Plan(logits=(3.0, 1.0)),
+        )
+        harness = self.harness(runtime)
+        body = self.body(
+            {
+                "a": {"type": "noul", "instructions": "First?"},
+                "b": {"type": "noul", "instructions": "Second?"},
+            }
+        )
+        status, _, payload = harness.request("POST", "/v1/systemone", body)
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(len(runtime.requests), 2)
+        self.assertEqual(
+            json.loads(payload)["usage"]["input_tokens"],
+            sum(len(request.prompt_tokens) for request in runtime.requests),
+        )
+
+    def test_legacy_warmup_deadline_cancels_before_questions(self):
+        runtime = FakeRuntime(Plan(logits=(1.0, 2.0), block=True))
+        harness = self.harness(runtime)
+        body = self.body(
+            {
+                "a": {"type": "noul", "instructions": "First?"},
+                "b": {"type": "noul", "instructions": "Second?"},
+            },
+            state="evidence " * 64,
+            timeout=0.3,
+        )
+        status, _, payload = harness.request("POST", "/v1/systemone", body)
+        self.assertEqual(status, 504, payload)
+        for _ in range(50):
+            if runtime.cancel_count:
+                break
+            time.sleep(0.02)
+        self.assertEqual(runtime.cancel_count, 1)
+        self.assertEqual(len(runtime.requests), 1)
+
     def test_open_grammars_accept_and_reject_with_llguidance(self):
         from llguidance import LLMatcher
 

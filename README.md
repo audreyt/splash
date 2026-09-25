@@ -69,7 +69,7 @@ Qwen3.8-27B also takes `low`, `medium`, and `xhigh`.
 `/v1/judgments` and `/v1/systemone` provide scoring without generation.
 Optional `/v1/systemone` fields add thinking, typed `string`, `integer` and
 `number` answers, dependent questions, permutation averaging, seeded sampling
-and images; requests without them are unchanged. See
+and images; requests without them keep their prompts and answers. See
 [judgment contracts](DEVELOPMENT.md#judgment-contracts) for details.
 
 ## Models

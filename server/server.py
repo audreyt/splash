@@ -710,6 +710,32 @@ class FrontendHandler(BaseHTTPRequestHandler):
             remaining_request_time(deadline)
             if self._client_disconnected():
                 raise ConnectionResetError("client disconnected before submission")
+            # One score job over the shared prefix lets every question resume
+            # from its published state; it adds nothing to usage or answers.
+            jobs = [job for _, _, job in entries if job is not None]
+            warmup = None
+            if len(jobs) > 1:
+                warmup = systemone.warmup_job(
+                    self.app, jobs, jobs[0].priority, deadline
+                )
+            if warmup is not None:
+                active_job = warmup
+                if not self.app.backend.submit(warmup):
+                    raise APIError(429, "request queue is full", "rate_limit_exceeded")
+                result = None
+                while result is None:
+                    kind, value = self._next_event(warmup)
+                    if kind == "done":
+                        result = value
+                if result.reason == "cancelled":
+                    if warmup.timed_out:
+                        raise APIError(504, "request timed out", "request_timeout")
+                    raise APIError(500, "request cancelled", "request_cancelled")
+                if result.reason != "stop" or len(result.option_logits) != len(
+                    warmup.score_tokens
+                ):
+                    raise APIError(500, "runtime protocol error", "protocol_error")
+                active_job = None
             answers = {}
             input_tokens = 0
             for qid, spec, job in entries:
