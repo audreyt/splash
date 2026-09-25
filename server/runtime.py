@@ -190,7 +190,6 @@ class GenerationRequest:
 class GenerationResult:
     request_id: int
     start: wire.StartEvent | None
-    tokens: tuple[int, ...]
     done: wire.DoneEvent
 
 
@@ -220,7 +219,6 @@ class RuntimeCall:
         self._error: EngineRuntimeError | None = None
         self._start: wire.StartEvent | None = None
         self._progress: wire.PromptProgressEvent | None = None
-        self._token_chunks: dict[int, tuple[int, ...]] = {}
         self._next_token_offset = 0
         self._mask_error: MaskComputationFailed | None = None
         self._callback_errors: list[BaseException] = []
@@ -333,7 +331,6 @@ class RuntimeCall:
                     f"TokensEvent stream length {next_offset} exceeds logical "
                     f"maximum {self.request.logical_max_output_tokens}"
                 )
-            self._token_chunks[event.sequence_offset] = event.tokens
             self._next_token_offset = next_offset
         self._emit(event)
         return None
@@ -402,12 +399,7 @@ class RuntimeCall:
                 raise ProtocolFatal(
                     "DoneEvent returned option logits for a generation request"
                 )
-            tokens = tuple(
-                token
-                for offset in sorted(self._token_chunks)
-                for token in self._token_chunks[offset]
-            )
-            return GenerationResult(self.request_id, self._start, tokens, done)
+            return GenerationResult(self.request_id, self._start, done)
 
     def _terminal_mask_error(self) -> MaskComputationFailed | None:
         with self._lock:

@@ -103,7 +103,8 @@ class CrashTraceRing:
                 self._bytes -= len(self._entries.popleft().frame)
 
     def record_frame(self, generation: int, direction: str, frame: wire.Frame) -> None:
-        self.record_bytes(generation, direction, wire.serialize_frame(frame))
+        if self.active:
+            self.record_bytes(generation, direction, wire.serialize_frame(frame))
 
     def dump(
         self,

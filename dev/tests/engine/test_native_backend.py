@@ -193,7 +193,7 @@ def make_job(request_id=101, *, constraint=None, temperature=0.0):
 
 def success_result(call, *, reason=wire.FinishReason.STOP, tokens=()):
     done = wire.DoneEvent(call.request_id, reason, 4, len(tokens), 1_250, 2_500, 4_000)
-    return runtime.GenerationResult(call.request_id, None, tuple(tokens), done)
+    return runtime.GenerationResult(call.request_id, None, done)
 
 
 class NativeBackendContractTests(unittest.TestCase):

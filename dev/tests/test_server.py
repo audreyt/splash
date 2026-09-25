@@ -495,12 +495,7 @@ class FakeRuntime:
             tuple(plan.logits) if plan.logits is not None else (),
         )
         call.complete(
-            result=api.engine_runtime.GenerationResult(
-                call.request_id,
-                None,
-                tuple(token for batch in plan.batches for token in batch),
-                done,
-            )
+            result=api.engine_runtime.GenerationResult(call.request_id, None, done)
         )
 
     def close(self):

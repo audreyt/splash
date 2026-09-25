@@ -164,6 +164,13 @@ class CrashTraceTest(unittest.TestCase):
                 )
                 self.assertEqual(len(list(directory.glob("*.json"))), 1)
 
+    def test_disabled_ring_does_not_reencode_received_frames(self):
+        ring = crash_trace.CrashTraceRing(("splash", "serve-native"))
+        frame = wire.encode_message(wire.StatusRequestFrame(1))
+        with mock.patch.object(crash_trace.wire, "serialize_frame") as serialize:
+            ring.record_frame(1, "engine_to_client", frame)
+        serialize.assert_not_called()
+
     def test_fake_process_factory_has_no_machine_global_trace(self):
         ring = crash_trace.CrashTraceRing(None)
         self.assertFalse(ring.active)
