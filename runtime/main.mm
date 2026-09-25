@@ -305,8 +305,7 @@ int runNative(const NativeArguments &arguments) {
         published->nativeLoop().resourceWaitSnapshot());
   };
 
-  const auto recoveryDeadline =
-      std::chrono::steady_clock::now() + kStartupMemoryRecoveryTimeout;
+  engine::StartupRetryWindow recovery(kStartupMemoryRecoveryTimeout);
   bool reportedRecoveryWait = false;
   std::unique_ptr<engine::RuntimeBootstrap> bootstrap;
   while (!bootstrap) {
@@ -323,12 +322,9 @@ int runNative(const NativeArguments &arguments) {
       if (transport.shutdownRequested())
         return static_cast<int>(engine::NativeProcessExit::CleanEof);
       const auto now = std::chrono::steady_clock::now();
-      const auto failure = error.report().resourceFailure;
-      if ((failure != engine::RuntimeResourceFailure::HostCapacity &&
-           failure != engine::RuntimeResourceFailure::DriverAllocation) ||
-          now >= recoveryDeadline) {
+      const auto recoveryDeadline = recovery.retryUntil(error.report(), now);
+      if (!recoveryDeadline)
         throw;
-      }
       if (!reportedRecoveryWait) {
         std::cerr
             << "Waiting for sufficient available memory to start; "
@@ -337,7 +333,7 @@ int runNative(const NativeArguments &arguments) {
       }
       const auto resumeAt = std::min(
           now + std::chrono::steady_clock::duration(kStartupMemoryRecoveryPoll),
-          recoveryDeadline);
+          *recoveryDeadline);
       while (std::chrono::steady_clock::now() < resumeAt &&
              !transport.shutdownRequested()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));

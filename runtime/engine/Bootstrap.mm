@@ -80,6 +80,21 @@ RuntimeBootstrapError::RuntimeBootstrapError(RuntimeBootstrapReport report)
 RuntimeBootstrapError::RuntimeBootstrapError(const RuntimeResourcesError &error)
     : RuntimeBootstrapError(reportForResourceFailure(error)) {}
 
+std::optional<StartupRetryWindow::Clock::time_point>
+StartupRetryWindow::retryUntil(const RuntimeBootstrapReport &failure,
+                               Clock::time_point now) {
+  if (failure.resourceFailure != RuntimeResourceFailure::HostCapacity &&
+      failure.resourceFailure != RuntimeResourceFailure::DriverAllocation)
+    return std::nullopt;
+  if (!deadline_ || failure.stage > stage_) {
+    deadline_ = now + length_;
+    stage_ = failure.stage;
+  }
+  if (now >= *deadline_)
+    return std::nullopt;
+  return deadline_;
+}
+
 RuntimeBootstrap::RuntimeBootstrap(std::unique_ptr<RuntimeResources> resources,
                                    std::unique_ptr<model::RuntimeModel> modelRuntime,
                                    std::unique_ptr<NativeRuntime> nativeLoop,
