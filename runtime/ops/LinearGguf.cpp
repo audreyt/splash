@@ -78,15 +78,17 @@ constexpr SplitTier kRegisterTiers[] = {{4, 256}, {32, 1024}};
 constexpr SplitTier kStagedTiers[] = {{6, 512}};
 
 // The projection is the plan's matrix, and each of its segments (which tile
-// its leading columns) fills whole column tiles; the columns past the last
-// segment are padding no kernel writes. A fused projection keeps the
-// layout's sizes: the 35B GGUF's packed GDN row is 12544 columns (the affine
-// layout's), its qkv|z|alpha-beta segments 12352.
+// its leading columns) fills whole column tiles of its kernels: 64 columns
+// for a quantized segment, 8 for a float one (addGgufFloat; F32 alpha/beta
+// are 96 columns on the 27B); the columns past the last segment are padding
+// no kernel writes. A fused projection keeps the layout's sizes: the 35B
+// GGUF's packed GDN row is 12544 columns (the affine layout's), its
+// qkv|z|alpha-beta segments 12352.
 void requireSegments(const Projection &p, LinearMatrix matrix) {
   if (p.outputSize != matrix.outputSize || p.inputSize != matrix.inputSize)
     throw std::invalid_argument("block projection does not match plan");
   for (const QuantizedSegment &s : p.blocks().segments)
-    if (s.outputSize % GGUF_TILE_COLUMNS)
+    if (s.outputSize % (s.isFloat() ? 8u : GGUF_TILE_COLUMNS))
       throw std::invalid_argument("block segments do not fill whole column tiles");
 }
 

@@ -6,9 +6,9 @@
 //   decode or prefill dispatch takes (with ragged tile tails), the router and
 //   alpha/beta widths, bf16 and fp32 destinations at a column offset of a
 //   wider row; neighbours stay untouched.
-// - Float segments of a fused GGUF projection (Linear), on either float
-//   tile: the quantized segments' outputs unchanged, the padding past the
-//   segments unwritten.
+// - Float segments of a fused GGUF projection (Linear), the 35B's and the
+//   27B's F32 alpha/beta widths, on either float tile: the quantized
+//   segments' outputs unchanged, the padding past the segments unwritten.
 // - MoE: every GGUF plan (the staged 8- and 32-row tiles and the Apple9
 //   register tile, whatever GPU runs the test; decode steps and prefill
 //   chunks) for all 8 formats, gate, up and down in three formats and the
@@ -251,16 +251,19 @@ int floatProjection(MetalBackend &backend) {
   return failures;
 }
 
-// A fused projection with a float segment, as the 35B's GDN input (qkv | z |
-// alpha-beta): the float projection writes the float segment's columns, the
-// quantized kernels the others bit for bit as without it, and the padding
-// past the last segment stays unwritten; decode through both GGUF decode
-// families (register, staged) at one to four lanes, and prefill, where a
-// one-core device takes the neural accelerator float tile from 16 rows.
-int floatSegments(MetalBackend &backend) {
-  constexpr uint32_t K = 1024, N = 768, kFloatColumn = 512, kCovered = 576;
+// A fused projection with a float segment of `floatColumns` columns, as the
+// GDN input (qkv | z | alpha-beta) of a GGUF storing alpha/beta as F32 (64
+// columns on the 35B, 96 on the 27B): the float projection writes the float
+// segment's columns, the quantized kernels the others bit for bit as without
+// it, and the padding past the last segment stays unwritten; decode through
+// both GGUF decode families (register, staged) at one to four lanes, and
+// prefill, where a one-core device takes the neural accelerator float tile
+// from 16 rows.
+int floatSegments(MetalBackend &backend, uint32_t floatColumns) {
+  constexpr uint32_t K = 1024, N = 768, kFloatColumn = 512;
+  const uint32_t covered = kFloatColumn + floatColumns;
   const Tensor q80 = quantized(backend, Q80, 256, K), q4k = quantized(backend, Q4K, 256, K);
-  const Tensor gates = floating(backend, 64, K, 0.05f);
+  const Tensor gates = floating(backend, floatColumns, K, 0.05f);
   const auto at = [](QuantizedSegment s, uint32_t offset) { s.columnOffset = offset; return s; };
   Projection full(N, K, splash::ops::BlockWeights{{at(q80.segment, 0),
       at(q4k.segment, 256), at(gates.segment, kFloatColumn)}});
@@ -289,18 +292,18 @@ int floatSegments(MetalBackend &backend) {
         for (uint32_t c = 0; c < N; ++c) {
           const uint64_t i = uint64_t{r} * N + c;
           if (c < kFloatColumn) differ += got[i] != want[i];
-          else if (c >= kCovered) written += got[i] != 0x7F7F;
+          else if (c >= covered) written += got[i] != 0x7F7F;
           else {
             const Dot d = dot(x.data() + uint64_t{r} * K, gates.row(c - kFloatColumn), K);
             __bf16 value;
             std::memcpy(&value, got + i, 2);
-            outside += !inside(float(value), d.value, floatBound(d, K, linear.ggufFloatTile(rows, 64)));
+            outside += !inside(float(value), d.value, floatBound(d, K, linear.ggufFloatTile(rows, floatColumns)));
           }
         }
       if (differ || outside || written) {
-        printf("  float segment %s family %u, %u cores: %zu quantized outputs differ, %zu float outputs outside the "
-               "fp32 bound, %zu padding outputs written FAIL\n", label.c_str(), family, device.gpuCoreCount, differ,
-               outside, written);
+        printf("  float segment %s family %u, %u cores, %u float columns: %zu quantized outputs differ, %zu float "
+               "outputs outside the fp32 bound, %zu padding outputs written FAIL\n", label.c_str(), family,
+               device.gpuCoreCount, floatColumns, differ, outside, written);
         ++failures;
       }
     };
@@ -333,8 +336,8 @@ int floatSegments(MetalBackend &backend) {
             });
     }
   }
-  printf("float segment: fused Q8_0|Q4_K|F32 decode B1-4 (register, staged) and prefill 1/24/33/263 rows, both float "
-         "tiles %s\n", failures ? "FAIL" : "ok");
+  printf("float segment: fused Q8_0|Q4_K|F32 (%u float columns) decode B1-4 (register, staged) and prefill "
+         "1/24/33/263 rows, both float tiles %s\n", floatColumns, failures ? "FAIL" : "ok");
   return failures;
 }
 
@@ -616,7 +619,8 @@ int main(int argc, const char *argv[]) {
     }
     try {
       MetalBackend backend(argv[1]);
-      const int failures = floatProjection(backend) + floatSegments(backend) + moe(backend);
+      const int failures =
+          floatProjection(backend) + floatSegments(backend, 64) + floatSegments(backend, 96) + moe(backend);
       if (failures) {
         std::cerr << "gguf_moe_test: " << failures << " failures\n";
         return 1;
