@@ -162,7 +162,8 @@ whether the Hub is asked:
 - The installed commits: the assembly's links, sizes and times are checked and
   it starts. It is re-assembled first when the draft's repository moved or
   this release changed the GGUF metadata adapter; if the new draft cannot be
-  fetched, the installed one is kept.
+  fetched or is not the family's ([Drafts](#drafts)), the installed one is
+  kept.
 - A new commit: only changed files are downloaded, and the new assembly
   replaces the installed one atomically once published.
 - No answer, or a new commit that cannot be installed: the installed model
@@ -199,12 +200,15 @@ which this does not move ([Weight preparation](#weight-preparation)).
 
 Each family names the repository of the DFlash2 checkpoint trained for it
 (`Draft` in `families.FAMILIES`), which holds it as the release publishes it:
-`config.json` and BF16 safetensors. Installation downloads only those files
-and follows the repository's default branch as it follows the target's
-([Revisions](#revisions)); `--draft-model` accepts another repository,
-followed the same way, or a local directory that holds them. Native
-loading validates the configuration against the target and prepares the
-draft like a target ([Weight preparation](#weight-preparation)):
+`config.json` and BF16 `model.safetensors` (or the shards its index names).
+Installation downloads only those files and follows the repository's default
+branch as it follows the target's ([Revisions](#revisions)); `--draft-model`
+accepts another repository, followed the same way, or a local directory that
+holds them. A checkpoint is installed only when its configuration states the
+family's draft signature (`Draft.signature`), every field and value native
+loading requires, so a draft of another architecture never replaces one that
+loads. Native loading validates the configuration against the target and
+prepares the draft like a target ([Weight preparation](#weight-preparation)):
 `DraftCheckpointLoader` (`DraftCheckpoint.cpp`) plans the packed draft files
 of a Splash package, `layer-<N>.bin` and `model.bin`, and `AffinePreparation`
 quantizes each projection to 4 bits in groups of 64 as MLX's affine

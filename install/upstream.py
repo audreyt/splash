@@ -331,9 +331,7 @@ def _start_installed(selection, target, installed):
         )
     recorded = installed["sources"]["target"]
     family = families.named(installed["family"])
-    draft = family and _resolve_draft(
-        family, selection, installed, ask_hub=_answered(target)
-    )
+    draft = family and _resolve_draft(family, selection, installed, target)
     if draft and draft.unreachable_reason:
         print(
             f"Could not reach the Hub ({draft.unreachable_reason}); "
@@ -423,9 +421,7 @@ def _install(selection, repo, installed, draft=None):
         target = inspect_target(repo, selection.variant, selection.language_only)
         family = families.family_for(target.config)
         if draft is None:
-            draft = _resolve_draft(
-                family, selection, installed, ask_hub=_answered(repo)
-            )
+            draft = _resolve_draft(family, selection, installed, repo)
         draft, files = _draft(family, installed, draft)
         print(
             f"Installing {selection.model} as {family.name} ({target.format}); "
@@ -488,19 +484,27 @@ def _changes(installed, family, draft):
     return changes
 
 
-def _resolve_draft(family, selection, installed, *, ask_hub):
+def _resolve_draft(family, selection, installed, target):
     """The draft's repository, --draft-model or else the family's DFlash2
     release, at the commit its default branch names now: one Hub request, as
-    for the target. The installed draft stands in, unlisted, when the Hub is
-    not asked, and with the reason when the draft cannot be resolved."""
+    for the target, made only when the Hub answered for the target. Else the
+    installed draft stands in, unlisted, or without one a commit the Hub
+    cache holds for this selection; the installed draft also stands in, with
+    the reason, when the draft cannot be resolved."""
     name = selection.draft_model or family.draft.repo
     recorded = installed and installed["sources"]["draft"]
-    if recorded and not ask_hub:
+    asked = _answered(target)
+    if recorded and not asked:
         return hub.Repository(recorded["repo"], recorded["revision"], frozenset())
     commit = recorded["revision"] if recorded and recorded["repo"] == name else None
     try:
         return hub.Repository.resolve(
-            name, installation=selection.link, installed=commit
+            name,
+            installation=selection.link,
+            installed=commit,
+            unreachable=None
+            if asked
+            else target.unreachable_reason or "the Hub did not list the target",
         )
     except models.ModelError as error:
         if not recorded:
@@ -527,7 +531,7 @@ def _draft(family, installed, draft):
             if not recorded:
                 raise
             models.warn(
-                f"cannot fetch the {family.name} draft {_at(draft)}; "
+                f"cannot use the {family.name} draft {_at(draft)}; "
                 f"keeping the installed one: {error}"
             )
     repo = hub.Repository.recorded(recorded)
@@ -547,21 +551,43 @@ def _at(repo):
 
 def _draft_files(repo, family):
     """The family's DFlash2 checkpoint in repo, downloaded, by assembly path:
-    config.json and the safetensors weights at the root of the repository or
-    --draft-model directory, as a DFlash2 release holds them."""
-    weights = {n for n in repo.files if "/" not in n and n.endswith(".safetensors")}
-    if "config.json" not in repo.files or not weights:
+    config.json and the safetensors weights, model.safetensors or the shards
+    its index names, at the root of the repository or --draft-model
+    directory, as a DFlash2 release holds them. Its configuration must state
+    the family's draft signature."""
+    try:
+        if "config.json" not in repo.files:
+            raise models.ModelError("no config.json")
+        weights = _weight_files(repo)
+    except models.ModelError as error:
         raise models.ModelError(
             f"{repo.name} does not contain a DFlash2 checkpoint for {family.name}"
-        )
+            f" ({error})"
+        ) from error
     config = models.read_json(repo.file("config.json"))
-    if (
-        config.get("architectures") != ["DFlash2DraftModel"]
-        or config.get("hidden_size") != dict(family.signature)["hidden_size"]
-        or config.get("num_hidden_layers") != family.draft.layers
-    ):
+    differences = [
+        f"{key} {_config_value(config, key)!r}, not {expected!r}"
+        for key, expected in family.draft.signature
+        if not _same(_config_value(config, key), expected)
+    ]
+    if differences:
         raise models.ModelError(
-            "draft configuration is incompatible with " + family.name
+            f"draft configuration is incompatible with {family.name}: "
+            + "; ".join(differences)
         )
     downloaded = repo.download({"config.json", *weights})
     return {"draft/" + name: path for name, path in downloaded.items()}
+
+
+def _config_value(config, key):
+    """config's value at a key dotted into its objects, lists as tuples, or
+    None."""
+    value = config
+    for part in key.split("."):
+        value = value.get(part) if isinstance(value, dict) else None
+    return tuple(value) if isinstance(value, list) else value
+
+
+def _same(value, expected):
+    """JSON equality that tells booleans from numbers."""
+    return value == expected and isinstance(value, bool) == isinstance(expected, bool)

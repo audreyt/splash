@@ -683,7 +683,7 @@ class UpstreamTest(unittest.TestCase):
             lambda p: draft_dir(p, DENSE), failing_revision="e" * 40
         )
         self.assertIn(
-            f"Warning: cannot fetch the {DENSE.name} draft {DENSE.draft.repo}@"
+            f"Warning: cannot use the {DENSE.name} draft {DENSE.draft.repo}@"
             f"{'e' * 12}; keeping the installed one: cannot fetch the {DENSE.name} "
             f"draft: [Errno {errno.ECONNRESET}] connection reset by peer",
             warnings,
@@ -696,9 +696,20 @@ class UpstreamTest(unittest.TestCase):
 
         warnings = self.move_target_and_draft(incomplete)
         self.assertIn(
-            f"Warning: cannot fetch the {DENSE.name} draft {DENSE.draft.repo}@"
+            f"Warning: cannot use the {DENSE.name} draft {DENSE.draft.repo}@"
             f"{'e' * 12}; keeping the installed one: {DENSE.draft.repo} does not "
             f"contain a DFlash2 checkpoint for {DENSE.name}",
+            warnings,
+        )
+
+    def test_a_new_draft_of_another_architecture_keeps_the_installed_draft(self):
+        warnings = self.move_target_and_draft(
+            lambda p: draft_dir(p, DENSE, **{"dflash_config.block_size": 16})
+        )
+        self.assertIn(
+            f"Warning: cannot use the {DENSE.name} draft {DENSE.draft.repo}@"
+            f"{'e' * 12}; keeping the installed one: draft configuration is "
+            f"incompatible with {DENSE.name}: dflash_config.block_size 16, not 8",
             warnings,
         )
 
@@ -860,6 +871,60 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn("is already installed", output)
         self.assertIn("external cache pruning", warnings)
         self.assertEqual(pins(self.cache), [])
+
+    def test_a_packed_draft_installation_is_installed_again(self):
+        # Assemblies linked Splash-DFlash2's packed drafts before drafts were
+        # prepared from their checkpoints; the runtime loads those no more.
+        fake = fake_hub(self, self.cache)
+        chosen = selection(self.root)
+        self.prepare(chosen)
+        record = assembly.verify(chosen.link)
+        files = {
+            name: Path(entry["path"])
+            for name, entry in record["files"].items()
+            if not name.startswith("draft/")
+        }
+        packed = self.root / "packed"
+        packed.mkdir()
+        for name in ("config.json", "model.bin", "layer-0.bin"):
+            (packed / name).write_text(name)
+            files["draft/" + name] = packed / name
+        old = record | {
+            "files": {name: assembly.file_record(path) for name, path in files.items()}
+        }
+        # As the installer that assembled such drafts did, without the check.
+        with (
+            models.installation_lock(chosen.models_root),
+            mock.patch.object(assembly, "_packed_draft", return_value=False),
+        ):
+            models.link_selection(
+                chosen.link, assembly.build(chosen.models_root, old, files)
+            )
+        fake.requests.clear()
+        output, _ = self.prepare(chosen)
+        self.assertIn(
+            f"Reinstalling {MODEL}: its draft is not a DFlash2 checkpoint", output
+        )
+        self.assertIn("draft/model.safetensors", assembly.verify(chosen.link)["files"])
+        self.assertEqual(fake.requests, [(MODEL, None), (DENSE.draft.repo, None)])
+
+    def test_a_damaged_assembly_and_an_unreachable_hub_cost_one_request(self):
+        fake = fake_hub(self, self.cache)
+        chosen = selection(self.root)
+        self.prepare(chosen)
+        built = next((chosen.models_root / ".resolved").iterdir())
+        (built / "tokenizer/tokenizer.json").unlink()
+        fake.failure = httpx.ConnectTimeout("")
+        fake.requests.clear()
+        output, _ = self.prepare(chosen)
+        self.assertIn("Reinstalling " + MODEL, output)
+        # The draft's repository is not asked when the Hub did not answer for
+        # the target: the commit the Hub cache holds for it stands in.
+        self.assertEqual(fake.requests, [(MODEL, None)])
+        self.assertEqual(
+            assembly.verify(chosen.link)["sources"]["draft"],
+            {"repo": DENSE.draft.repo, "revision": DRAFT_COMMIT},
+        )
 
     def test_damaged_assembly_is_rebuilt(self):
         fake = fake_hub(self, self.cache)

@@ -228,7 +228,9 @@ class Repository:
         return cls.cached(source["repo"], source["revision"])
 
     @classmethod
-    def resolve(cls, name, revision=None, *, installation=None, installed=None):
+    def resolve(
+        cls, name, revision=None, *, installation=None, installed=None, unreachable=None
+    ):
         """name at the commit revision names now. This decides whether the
         Hub is asked.
 
@@ -242,8 +244,10 @@ class Repository:
         Hub cache. Otherwise one request resolves revision. When the Hub
         cannot answer, installed stands in the same way, with the reason in
         unreachable_reason; without it, the cached snapshot of a commit this
-        selection already names does (_cached_commits). A different revision
-        is never substituted."""
+        selection already names does (_cached_commits). unreachable, why the
+        Hub did not answer for another repository this start, stands for its
+        answer without a request. A different revision is never
+        substituted."""
         import httpx
         from huggingface_hub import HfApi, constants
 
@@ -256,6 +260,8 @@ class Repository:
             return cls(name, installed, frozenset())
         if constants.HF_HUB_OFFLINE:
             why = "HF_HUB_OFFLINE is set"
+        elif unreachable:
+            why = unreachable
         else:
             try:
                 info = HfApi().model_info(

@@ -48,18 +48,18 @@ def mlx_target(root, family, *, changes=None):
     return root
 
 
-def draft_dir(root, family):
-    """A DFlash2 release of family's draft: its configuration and weights."""
+def draft_dir(root, family, **changes):
+    """A DFlash2 release of family's draft: its configuration, stating the
+    draft signature with changes (dotted keys), and weights."""
     root.mkdir(parents=True, exist_ok=True)
-    (root / "config.json").write_text(
-        json.dumps(
-            {
-                "architectures": ["DFlash2DraftModel"],
-                "hidden_size": dict(family.signature)["hidden_size"],
-                "num_hidden_layers": family.draft.layers,
-            }
-        )
-    )
+    config = {}
+    for key, value in (dict(family.draft.signature) | changes).items():
+        *objects, name = key.split(".")
+        node = config
+        for part in objects:
+            node = node.setdefault(part, {})
+        node[name] = list(value) if isinstance(value, tuple) else value
+    (root / "config.json").write_text(json.dumps(config))
     (root / "model.safetensors").write_bytes(b"draft")
     return root
 
