@@ -272,7 +272,10 @@ ActualMemoryReport validActual(const EngineMemoryPlan &plan) {
       actual.sharedDecodeBytes + actual.kvResidentBytes;
   actual.deviceCurrentAllocatedBytes = actual.backendAllocatedBytes;
   actual.devicePeakAllocatedBytes = actual.backendAllocatedBytes;
-  actual.estimatedWarmupPeakBytes = actual.backendAllocatedBytes;
+  // Model warmup estimates add the pipeline and runtime reserves.
+  actual.estimatedWarmupPeakBytes = actual.backendAllocatedBytes +
+                                    budget.pipelineReserveBytes +
+                                    budget.runtimeOverheadReserveBytes;
   return actual;
 }
 
@@ -399,7 +402,7 @@ public:
           int throwingStep = -1, bool failReadyWrite = false)
       : backing_(16), pool_(backing_),
         resources_(pool_, CacheNamespace{}),
-        executor_(validActual(plan).devicePeakAllocatedBytes, failingStep,
+        executor_(validActual(plan).estimatedWarmupPeakBytes, failingStep,
                   throwingStep),
         loop_(
             loopConfig(), resources_, executor_,
@@ -439,7 +442,7 @@ void testAllNativeWarmupsPrecedeReady() {
   auto report = engine::RuntimeBootstrap::requireWarmupAndAnnounce(
       plan, harness.executor(),
       [&](uint64_t estimate) {
-        require(estimate == actual.devicePeakAllocatedBytes,
+        require(estimate == actual.estimatedWarmupPeakBytes,
                 "bootstrap lost the maximum measured peak");
         actual.estimatedWarmupPeakBytes = estimate;
         return actual;
