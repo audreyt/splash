@@ -370,9 +370,11 @@ print('independent oracle passed')
 
 
 class ClientRun:
-    def __init__(self, name, path, folder, model, context, timeout):
+    def __init__(self, name, path, folder, model, context, timeout, input_modalities):
         self.name, self.path, self.folder = name, path, folder
         self.model, self.context, self.timeout = model, context, timeout
+        # What the served model accepts, as /v1/models reports it.
+        self.input_modalities = input_modalities
         self.workspace = (folder / "project").resolve()
         self.session = None
         self.phases = []
@@ -388,6 +390,7 @@ class ClientRun:
             self.model,
             self.context,
             launcher.RUNTIME_DIR,
+            input_modalities=self.input_modalities,
         )
         # subprocess(cwd=...) does not update inherited PWD. Keep both views
         # consistent, just as a user shell entering the project would.
@@ -662,6 +665,7 @@ class ClientRun:
                 self.model,
                 self.context,
                 launcher.RUNTIME_DIR,
+                input_modalities=self.input_modalities,
             )
             env["PWD"] = str(self.workspace)
             # A regular file avoids losing buffered pipe output when the CLI
@@ -877,7 +881,8 @@ def main(argv=None):
                     )
                 time.sleep(0.5)
         initial = idle_status()
-        model = launcher._request_json("/v1/models")["data"][0]["id"]
+        served = launcher._request_json("/v1/models")["data"][0]
+        model = served["id"]
         context = initial["maximum_context_tokens"]
         validate_server_configuration(
             initial,
@@ -912,6 +917,7 @@ def main(argv=None):
                 model,
                 context,
                 args.client_timeout,
+                served["input_modalities"],
             )
             entry = {**versions[name], "result": "running", "phases": runner.phases}
             document["clients"][name] = entry

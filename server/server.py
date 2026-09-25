@@ -396,6 +396,8 @@ class FrontendHandler(BaseHTTPRequestHandler):
                     "owned_by": "splash",
                     "max_model_len": self.app.max_context,
                     "context_length": self.app.max_context,
+                    "vision": self.app.vision,
+                    "input_modalities": self.app.input_modalities,
                     **({"root": self.app.model} if name != self.app.model else {}),
                 }
                 for name in self.app.model_names
@@ -516,9 +518,7 @@ class FrontendHandler(BaseHTTPRequestHandler):
             if count_tokens:
                 tokens = self.app.count_tokens(
                     anthropic_to_chat_prompt(
-                        body,
-                        deadline=deadline,
-                        thinking_resolver=self.app.thinking_codec.decode,
+                        body, thinking_resolver=self.app.thinking_codec.decode
                     ),
                     deadline=deadline,
                 )
@@ -551,9 +551,7 @@ class FrontendHandler(BaseHTTPRequestHandler):
             if anthropic:
                 job, thinking, has_tools = self.app.prepare(
                     anthropic_to_chat_body(
-                        body,
-                        deadline=deadline,
-                        thinking_resolver=self.app.thinking_codec.decode,
+                        body, thinking_resolver=self.app.thinking_codec.decode
                     ),
                     deadline=deadline,
                     clamp_output_budget=True,
@@ -2002,11 +2000,12 @@ def main():
             args.max_new_tokens,
             args.request_timeout,
             readiness.max_concurrent_requests,
-            constraint_factory,
+            constraint_factory=constraint_factory,
             max_image_pixels=args.max_image_pixels,
             thinking_codec=thinking_codec,
             served_model_names=args.served_model_name,
             default_reasoning_effort=args.default_reasoning_effort,
+            vision=readiness.vision,
         )
         server.app = app
         server.server_activate()
@@ -2016,7 +2015,8 @@ def main():
             if effective_context % 1024 == 0
             else f"{effective_context:,}"
         )
-        print_status(f"Ready · {args.model} · context {context} · {address}")
+        mode = "" if readiness.vision else " · language only"
+        print_status(f"Ready · {args.model} · context {context}{mode} · {address}")
         server.serve_forever()
     except (engine_runtime.EngineUnhealthy, ThinkingKeyError) as error:
         print_status(f"Error · {error}", error=True)

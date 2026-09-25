@@ -599,6 +599,7 @@ class LauncherTests(unittest.TestCase):
                             {
                                 "id": MODEL_ID,
                                 "owned_by": "splash",
+                                "input_modalities": ["text", "image", "pdf"],
                             }
                         ]
                     }
@@ -703,7 +704,7 @@ class LauncherTests(unittest.TestCase):
             draft.mkdir()
             options = {
                 "revision": "v2",
-                "language_only": False,
+                "language_only": True,
                 "draft_model": str(draft.resolve()),
             }
             with (
@@ -727,6 +728,7 @@ class LauncherTests(unittest.TestCase):
                         "v2",
                         "--draft-model",
                         str(draft),
+                        "--language-only",
                     ]
                 )
             (chosen,) = install.call_args.args
@@ -758,9 +760,10 @@ class LauncherTests(unittest.TestCase):
                     parsed.command,
                     parsed.model,
                     parsed.revision,
+                    parsed.language_only,
                     parsed.draft_model,
                 ),
-                ("prepare", MODEL_ID, "v2", options["draft_model"]),
+                ("prepare", MODEL_ID, "v2", True, options["draft_model"]),
             )
 
     def test_server_holds_the_assembly_it_serves(self):

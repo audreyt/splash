@@ -293,6 +293,11 @@ def parse_args(argv=None):
         type=parse_draft_model,
         help="override the automatically selected DFlash2 repository or local directory",
     )
+    parser.add_argument(
+        "--language-only",
+        action="store_true",
+        help="skip vision preparation and loading",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("prepare")
     commands.add_parser("verify").add_argument("--full", action="store_true")
@@ -312,6 +317,7 @@ def main(argv=None):
         args.models,
         args.model,
         revision=args.revision,
+        language_only=args.language_only,
         draft_model=args.draft_model,
     )
     try:

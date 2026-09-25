@@ -15,7 +15,7 @@ void require(bool value, const char *message) {
     throw std::runtime_error(message);
 }
 
-EngineMemoryPlan plan() {
+EngineMemoryPlan plan(uint64_t visionBytes = kGiB) {
   DeviceCapabilities device;
   device.deviceName = "test";
   device.appleGpuFamily = 9;
@@ -29,10 +29,13 @@ EngineMemoryPlan plan() {
   device.hasUnifiedMemory = true;
   device.supportsPlacementSparse = true;
   return requireEngineMemoryPlan(
-      device, test::modelMemoryProfile(2 * kGiB, 1 * kGiB, 1 * kGiB));
+      device, test::modelMemoryProfile(2 * kGiB, 1 * kGiB, visionBytes));
 }
 
-ActualMemoryReport report(const EngineMemoryPlan &memoryPlan) {
+// A consistent warmup report; `unclassifiedBytes` are backend buffers no
+// loader reported.
+ActualMemoryReport report(const EngineMemoryPlan &memoryPlan,
+                          uint64_t unclassifiedBytes = 0) {
   const auto &b = memoryPlan.breakdown();
   ActualMemoryReport result;
   result.targetWeightsBytes = b.targetWeightsBytes;
@@ -46,7 +49,7 @@ ActualMemoryReport report(const EngineMemoryPlan &memoryPlan) {
       result.targetWeightsBytes + result.draftWeightsBytes +
       result.visionWeightsBytes + result.stateResidentBytes +
       result.sharedPrefillBytes + result.sharedDecodeBytes +
-      result.kvResidentBytes;
+      result.kvResidentBytes + unclassifiedBytes;
   result.deviceCurrentAllocatedBytes = result.backendAllocatedBytes;
   result.devicePeakAllocatedBytes = result.backendAllocatedBytes + 16 * kMiB;
   result.estimatedWarmupPeakBytes = result.devicePeakAllocatedBytes;
@@ -76,6 +79,30 @@ void testUnifiedDynamicAudit() {
           "dynamic state/KV budget overflow was accepted");
 }
 
+void testOptionalVisionAudit() {
+  const auto textOnly = plan(0);
+  require(auditActualMemory(textOnly, report(textOnly)).valid,
+          "text-only warmup requires nonexistent vision weights");
+}
+
+// Weights are planned from what loaded, so their rows have no bound of their
+// own; a buffer a loader does not report counts against the reserves.
+void testUnreportedAllocationsCountAgainstReserves() {
+  const auto memoryPlan = plan();
+  const auto &budget = memoryPlan.breakdown();
+  const uint64_t reserves =
+      budget.pipelineReserveBytes + budget.runtimeOverheadReserveBytes;
+  const auto withinReserves =
+      auditActualMemory(memoryPlan, report(memoryPlan, reserves));
+  require(withinReserves.valid &&
+              withinReserves.backendUnclassifiedBytes == reserves,
+          "unreported allocations that fit the reserves were rejected or "
+          "not counted");
+  require(auditActualMemory(memoryPlan, report(memoryPlan, reserves + 1))
+                  .error == MemoryAuditError::RuntimeReserveExceeded,
+          "unreported allocations beyond the reserves were accepted");
+}
+
 void testFixedCategoryAndPeakFailures() {
   EngineMemoryPlan memoryPlan = plan();
   ActualMemoryReport actual = report(memoryPlan);
@@ -103,6 +130,8 @@ void testFixedCategoryAndPeakFailures() {
 int main() {
   try {
     testUnifiedDynamicAudit();
+    testOptionalVisionAudit();
+    testUnreportedAllocationsCountAgainstReserves();
     testFixedCategoryAndPeakFailures();
     std::cout << "elastic memory audit tests passed\n";
     return EXIT_SUCCESS;

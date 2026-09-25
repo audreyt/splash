@@ -187,6 +187,8 @@ int main(int argc, char **argv) {
     try {
       verifyComparison();
       const auto descriptor = splash::model::inspectModelPackage(argv[2]);
+      if (descriptor.visionSource == splash::model::VisionSource::None)
+        throw std::runtime_error("the model has no vision role");
       MetalBackend backend(argv[1]);
       const auto loader = splash::model::planVisionLoader(backend, argv[2], descriptor);
       const splash::model::QwenVisionWeights model =

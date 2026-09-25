@@ -444,6 +444,9 @@ struct Runtime::Impl {
   metal::AllocationResult stageImages(const ModelRequest &request) {
     if (request.images.empty() || stagedImages.contains(request.id))
       return true;
+    // The engine rejects image requests at submission when there is no vision.
+    if (!package.descriptor.hasVision())
+      throw std::logic_error("image request reached a model without vision");
     std::vector<ImageState> staged;
     staged.reserve(request.images.size());
     uint64_t bytes = 0;

@@ -30,7 +30,6 @@ if __package__:
     from .errors import APIError, ContextLengthError
     from .latency import LatencyMetrics
     from .metrics import is_finite_number
-    from .thinking import ThinkingCodec
     from .tokenization import PromptTokenizer
     from .tool_schema import (
         THINK_END,
@@ -57,7 +56,6 @@ else:
     from errors import APIError, ContextLengthError
     from latency import LatencyMetrics
     from metrics import is_finite_number
-    from thinking import ThinkingCodec
     from tokenization import PromptTokenizer
     from tool_schema import (
         THINK_END,
@@ -220,14 +218,19 @@ class Frontend:
         default_max_new,
         request_timeout,
         preparation_capacity,
-        constraint_factory=None,
+        *,
+        constraint_factory,
+        thinking_codec,
+        vision,
         max_image_pixels=image_input.MAX_PIXELS,
-        thinking_codec=None,
         served_model_names=(),
         default_reasoning_effort=None,
     ):
         if not isinstance(preparation_capacity, int) or preparation_capacity <= 0:
             raise ValueError("frontend preparation capacity must be positive")
+        # Announced by the engine in its Ready event. Without it, message
+        # normalization rejects image and PDF input before any decoding.
+        self.vision = vision
         self.latencies = LatencyMetrics()
         self.tokenizer = tokenizer
         self.prompt_tokenizer = PromptTokenizer(tokenizer)
@@ -260,23 +263,27 @@ class Frontend:
         self.preparation_active = 0
         self.preparation_waiting = 0
         self.response_store = ResponseStore()
-        self.thinking_codec = (
-            ThinkingCodec() if thinking_codec is None else thinking_codec
-        )
+        self.thinking_codec = thinking_codec
 
     def accepts_model(self, model):
         return isinstance(model, str) and model in self.model_names
 
+    @property
+    def input_modalities(self):
+        """The one list /status, /v1/models and client setup report."""
+        return ["text", "image", "pdf"] if self.vision else ["text"]
+
     def status(self):
         status = self.backend.status()
+        status["vision"] = self.vision
+        status["input_modalities"] = self.input_modalities
         with self.preparation_lock:
             status["frontend"] = {
                 "preparation_capacity": self.preparation_capacity,
                 "active": self.preparation_active,
                 "waiting": self.preparation_waiting,
             }
-        if self.constraint_factory is not None:
-            status["grammar_cache"] = self.constraint_factory.stats()
+        status["grammar_cache"] = self.constraint_factory.stats()
         status["response_store"] = self.response_store.stats()
         status["image_cache"] = self.images.stats()
         status["tokenizer_cache"] = self.prompt_tokenizer.stats()
@@ -698,7 +705,9 @@ class Frontend:
         if preserve_thinking is not None and not isinstance(preserve_thinking, bool):
             raise APIError(400, "preserve_thinking must be a boolean")
         messages = template_messages(
-            normalize_messages(body.get("messages"), deadline=deadline)
+            normalize_messages(
+                body.get("messages"), vision=self.vision, deadline=deadline
+            )
         )
         tools, tool_policy = normalize_tools(
             body.get("tools"),
@@ -903,9 +912,7 @@ class Frontend:
         image_positions, thinking = rendered.image_positions, rendered.thinking
         constraint = None
         remaining_request_time(deadline)
-        if self.constraint_factory is not None and (
-            tools or response_schema is not None
-        ):
+        if tools or response_schema is not None:
             with self.latencies.measure("grammar"):
                 if tools:
                     constraint = self.constraint_factory.create(

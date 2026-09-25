@@ -9,16 +9,19 @@ import re
 
 if __package__:
     from . import json_codec
-    from .documents import DocumentBudget, document_content, file_content
+    from .documents import DocumentBudget, document_parts, file_content
     from .errors import APIError
     from .metrics import metrics_dict, timings_dict, usage_dict
 else:  # ``python server/server.py`` from the repo root.
     import json_codec
-    from documents import DocumentBudget, document_content, file_content
+    from documents import DocumentBudget, document_parts, file_content
     from errors import APIError
     from metrics import metrics_dict, timings_dict, usage_dict
 
 IMAGE_PAD_TOKEN = "<|image_pad|>"
+VISION_UNAVAILABLE = (
+    "this model is serving without vision (started with --language-only)"
+)
 
 
 def _text_content(content):
@@ -48,38 +51,51 @@ def _image_part(url):
     return {"type": "image_url", "image_url": {"url": url}}
 
 
-def _user_content(content, document_budget=None):
+def _media_content(parts):
+    """Canonical parts, or their text when they carry no image or file."""
+    if any(part["type"] != "text" for part in parts):
+        return parts
+    return "".join(part["text"] for part in parts)
+
+
+def _require_vision(modality, vision):
+    """Reject image or PDF input before it is decoded or rendered."""
+    if not vision:
+        raise APIError(400, f"{modality} input is not supported: {VISION_UNAVAILABLE}")
+
+
+def _user_content(content, document_budget, vision):
     """Text for plain user content; a canonical parts list when it carries
-    images, so the chat template places each image where the author put it."""
+    images, so the chat template places each image where the author put it.
+
+    The one place media is accepted or rejected: every API shape converts its
+    image and PDF parts to image_url and file parts that reach this point
+    before anything is decoded or rendered."""
     if not isinstance(content, list):
         return _text_content(content)
     parts = []
-    images = 0
     for part in content:
         if not isinstance(part, dict):
             raise APIError(400, "message content parts must be objects")
         kind = part.get("type")
         if kind == "image_url":
+            _require_vision("image", vision)
             image_url = part.get("image_url")
             url = image_url.get("url") if isinstance(image_url, dict) else image_url
             parts.append(_image_part(url))
-            images += 1
         elif kind in ("text", "input_text"):
             text = part.get("text", "")
             if not isinstance(text, str):
                 raise APIError(400, "text message content must be a string")
             parts.append({"type": "text", "text": text})
         elif kind == "file":
-            rendered = file_content(part.get("file"), budget=document_budget)
-            parts.extend(rendered)
-            images += sum(p["type"] == "image_url" for p in rendered)
+            _require_vision("PDF", vision)
+            parts.extend(file_content(part.get("file"), budget=document_budget))
         elif kind in ("video", "video_url", "input_audio"):
             raise APIError(400, f"{kind} content is not supported")
         else:
             raise APIError(400, "unsupported message content part")
-    if not images:
-        return "".join(part["text"] for part in parts)
-    return parts
+    return _media_content(parts)
 
 
 _JSON_NUMBER = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
@@ -189,7 +205,7 @@ def _unfinished_json(text):
     return stack != ["done"]
 
 
-def normalize_messages(messages, *, deadline=None):
+def normalize_messages(messages, *, vision, deadline=None):
     document_budget = DocumentBudget(deadline=deadline)
     if not isinstance(messages, list) or not messages:
         raise APIError(400, "messages must be a non-empty array")
@@ -210,7 +226,7 @@ def normalize_messages(messages, *, deadline=None):
         content = message.get("content")
         item = {
             "role": role,
-            "content": _user_content(content, document_budget)
+            "content": _user_content(content, document_budget, vision)
             if role in ("user", "tool")
             else _text_content(content),
         }
@@ -337,12 +353,7 @@ def _responses_content(content):
             raise APIError(
                 400, "only text, image and inline PDF Responses content is supported"
             )
-    # File rendering belongs to request preparation, with one shared budget.
-    return (
-        parts
-        if any(p["type"] != "text" for p in parts)
-        else "".join(p["text"] for p in parts)
-    )
+    return _media_content(parts)
 
 
 def normalize_responses_input(instructions, items):
@@ -608,10 +619,10 @@ def _anthropic_system_text(value, label):
     return "".join(parts) or None
 
 
-def _anthropic_content(value, label, document_budget=None):
+def _anthropic_content(value, label):
     """Text for plain Anthropic content; canonical parts in document order when
-    its blocks carry images. User messages and tool results share it, so the
-    template places each image where the author put it."""
+    its blocks carry images or documents. User messages and tool results share
+    it, so the template places each image where the author put it."""
     if isinstance(value, str):
         return value
     if not isinstance(value, list):
@@ -634,13 +645,13 @@ def _anthropic_content(value, label, document_budget=None):
                 _image_part(f"data:{source['media_type']};base64,{source['data']}")
             )
         elif kind == "document":
-            parts.extend(document_content(block, budget=document_budget))
+            parts.extend(document_parts(block))
         else:
             raise APIError(400, f"{label} contains unsupported content")
-    return _user_content(parts)
+    return _media_content(parts)
 
 
-def anthropic_to_chat_body(body, *, deadline=None, thinking_resolver=None):
+def anthropic_to_chat_body(body, *, thinking_resolver):
     max_tokens = body.get("max_tokens")
     if (
         not isinstance(max_tokens, int)
@@ -650,9 +661,7 @@ def anthropic_to_chat_body(body, *, deadline=None, thinking_resolver=None):
         raise APIError(400, "max_tokens must be a positive integer")
     if not isinstance(body.get("stream", False), bool):
         raise APIError(400, "stream must be a boolean")
-    chat = anthropic_to_chat_prompt(
-        body, deadline=deadline, thinking_resolver=thinking_resolver
-    )
+    chat = anthropic_to_chat_prompt(body, thinking_resolver=thinking_resolver)
     chat.update(
         max_completion_tokens=max_tokens,
         stop=body.get("stop_sequences"),
@@ -688,7 +697,7 @@ def _anthropic_preserve_thinking(context_management):
     return True if edits else None
 
 
-def anthropic_to_chat_prompt(body, *, deadline=None, thinking_resolver=None):
+def anthropic_to_chat_prompt(body, *, thinking_resolver):
     if not isinstance(body.get("model"), str) or not body["model"]:
         raise APIError(400, "model must be a non-empty string")
     preserve_thinking = _anthropic_preserve_thinking(body.get("context_management"))
@@ -726,7 +735,6 @@ def anthropic_to_chat_prompt(body, *, deadline=None, thinking_resolver=None):
         raise APIError(400, "messages must be a non-empty array")
 
     translated = []
-    document_budget = DocumentBudget(deadline=deadline)
     system_text = None
     system = body.get("system")
     if system is not None:
@@ -773,10 +781,6 @@ def anthropic_to_chat_prompt(body, *, deadline=None, thinking_resolver=None):
                 if not isinstance(signature, str):
                     raise APIError(400, "invalid thinking signature")
                 if signature:
-                    if thinking_resolver is None:
-                        raise APIError(
-                            400, "thinking signature requires its serving instance"
-                        )
                     try:
                         reasoning = thinking_resolver(signature)
                     except APIError as error:
@@ -823,7 +827,7 @@ def anthropic_to_chat_prompt(body, *, deadline=None, thinking_resolver=None):
                         "role": "tool",
                         "tool_call_id": block["tool_use_id"],
                         "content": _anthropic_content(
-                            block.get("content", ""), "tool_result", document_budget
+                            block.get("content", ""), "tool_result"
                         ),
                     }
                 )
@@ -853,9 +857,7 @@ def anthropic_to_chat_prompt(body, *, deadline=None, thinking_resolver=None):
                 translated.append(
                     {
                         "role": role,
-                        "content": _anthropic_content(
-                            user_blocks, "user message", document_budget
-                        ),
+                        "content": _anthropic_content(user_blocks, "user message"),
                     }
                 )
 
