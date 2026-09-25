@@ -321,7 +321,8 @@ def resolve_snapshot(repo_id: str):
 def prepare(selection):
     """Start the package the selection link names, or install it: a link to
     its verified Hub snapshot, pinned for this installation before it is
-    published."""
+    published. The download runs outside the installation lock, which every
+    start takes."""
     if selection.variant is not None:
         raise models.ModelError(
             "this runtime package has no variants; drop the :VARIANT suffix"
@@ -338,16 +339,18 @@ def prepare(selection):
                 raise models.ModelError(
                     f"cannot identify the local package at {link}; move it aside before installing"
                 ) from None
-            print(
-                f"Installing {selection.model}; missing artifacts will be downloaded.",
-                flush=True,
-            )
-            snapshot = resolve_snapshot(selection.repo_id)
-            pin = hub.pin(snapshot, selection.repo_id, link)
-            models.link_selection(link, snapshot)
-            verify(link, selection.repo_id, full=False)
-            print(f"Installed verified Splash model {selection.model} in {link}")
-            hub.retire_other_pins([pin])
         else:
             print(f"Splash model {selection.model} is already installed in {link}")
             hub.repair_pins(link, [(installed_snapshot(link), selection.repo_id)])
+            return
+    print(
+        f"Installing {selection.model}; missing artifacts will be downloaded.",
+        flush=True,
+    )
+    snapshot = resolve_snapshot(selection.repo_id)
+    with models.installation_lock(selection.models_root):
+        pin = hub.pin(snapshot, selection.repo_id, link)
+        models.link_selection(link, snapshot)
+        verify(link, selection.repo_id, full=False)
+        print(f"Installed verified Splash model {selection.model} in {link}")
+        hub.retire_other_pins([pin])

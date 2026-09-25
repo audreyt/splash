@@ -2,6 +2,7 @@ import argparse
 import contextlib
 import copy
 import errno
+import fcntl
 import io
 import json
 import os
@@ -635,6 +636,38 @@ class ModelArtifactTest(unittest.TestCase):
         second.assert_not_called()
         hash_file.assert_not_called()
         self.api.assert_not_called()
+
+    def test_a_package_downloads_outside_the_installation_lock(self):
+        snapshot, _ = self.package_fixture()
+        models = self.root / "models"
+
+        def locked():
+            with (models / ".install.lock").open("a+b") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return True
+            return False
+
+        def download(repo_id):
+            # Every start takes the lock; none waits for a download.
+            self.assertFalse(locked())
+            return snapshot
+
+        pin = hub.pin
+
+        def pin_locked(*arguments):
+            self.assertTrue(locked())
+            return pin(*arguments)
+
+        with (
+            mock.patch.object(legacy, "resolve_snapshot", side_effect=download),
+            mock.patch.object(hub, "pin", side_effect=pin_locked) as pinned,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            legacy.prepare(installer.Selection.of(models, self.MODEL_ID))
+        pinned.assert_called_once()
+        self.assertEqual((models / self.MODEL_ID).resolve(), snapshot.resolve())
 
     def test_installed_package_starts_through_prepare_without_the_hub(self):
         snapshot, _ = self.package_fixture()
