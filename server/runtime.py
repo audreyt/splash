@@ -112,7 +112,18 @@ class ProtocolFatal(EngineRuntimeError):
 
 
 class MaskComputationFailed(EngineRuntimeError):
-    pass
+    """A token mask was not delivered.
+
+    ``retryable`` marks a server condition, such as a full mask queue or a
+    stalled transport, rather than the request's constraint or provider.
+    """
+
+    def __init__(self, message: str, *, retryable: bool = False):
+        self.retryable = retryable
+        super().__init__(message)
+
+    def restate(self) -> MaskComputationFailed:
+        return MaskComputationFailed(*self.args, retryable=self.retryable)
 
 
 @dataclass(slots=True, frozen=True)
@@ -1208,7 +1219,9 @@ class MultiplexedRuntime:
             )
             return
         if not self._mask_slots.acquire(blocking=False):
-            self._mask_failed(call, MaskComputationFailed("token-mask queue is full"))
+            self._mask_failed(
+                call, MaskComputationFailed("token-mask queue is full", retryable=True)
+            )
             return
 
         def compute():
@@ -1220,7 +1233,7 @@ class MultiplexedRuntime:
             future = self._mask_executor.submit(compute)
         except RuntimeError as error:
             self._mask_slots.release()
-            self._mask_failed(call, MaskComputationFailed(str(error)))
+            self._mask_failed(call, MaskComputationFailed(str(error), retryable=True))
             return
 
         def complete(completed) -> None:
@@ -1243,8 +1256,9 @@ class MultiplexedRuntime:
                     return
                 self._write_bytes(encoded, call.generation, call=call)
             except BaseException as error:
-                if isinstance(error, EngineRuntimeError):
-                    failure = MaskComputationFailed(str(error))
+                if isinstance(error, (EngineRuntimeError, TimeoutError)):
+                    # The transport, not the request's constraint, failed.
+                    failure = MaskComputationFailed(str(error), retryable=True)
                 elif isinstance(error, wire.ProtocolError):
                     failure = MaskComputationFailed(error.issue.describe())
                 else:

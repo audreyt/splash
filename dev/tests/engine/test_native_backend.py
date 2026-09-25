@@ -885,6 +885,14 @@ class NativeBackendContractTests(unittest.TestCase):
             ),
             (runtime.EngineUnhealthy("gpu failed"), (503, "runtime_unavailable")),
             (runtime.ProtocolFatal("bad frame"), (500, "protocol_error")),
+            (
+                runtime.MaskComputationFailed("grammar has no valid token"),
+                (400, "constraint_error"),
+            ),
+            (
+                runtime.MaskComputationFailed("queue is full", retryable=True),
+                (503, "runtime_busy"),
+            ),
         )
         for native, expected in cases:
             with self.subTest(native=native):

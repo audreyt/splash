@@ -739,6 +739,8 @@ class NativeBackend:
         if isinstance(error, engine_runtime.CapacityExhausted):
             return APIError(503, str(error), "capacity_exhausted")
         if isinstance(error, engine_runtime.MaskComputationFailed):
+            if error.retryable:
+                return APIError(503, str(error), "runtime_busy")
             return APIError(400, str(error), "constraint_error")
         if isinstance(
             error, (engine_runtime.EngineUnhealthy, engine_runtime.RuntimeClosed)

@@ -1010,6 +1010,60 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn(recovered.request_id, calls_to_provider)
         self.assertTrue(runtime.ready)
 
+    def test_full_mask_queue_fails_the_request_as_retryable(self):
+        started, release = threading.Event(), threading.Event()
+
+        def provider(event):
+            started.set()
+            release.wait(5.0)
+            return (1,) * (event.words_per_mask * event.mask_rows)
+
+        factory = FakeFactory()
+        runtime = engine_runtime.MultiplexedRuntime(
+            process_factory=factory, pending_limit=1
+        )
+        self.addCleanup(runtime.close)
+        self.addCleanup(release.set)
+        process = factory.processes[0]
+
+        def constrained(token):
+            call = runtime.submit(
+                request(
+                    token,
+                    cohort=wire.Cohort.CONSTRAINED,
+                    constraint=wire.ConstraintMode.TOKEN_MASK,
+                    mask_provider=provider,
+                )
+            )
+            process.send(
+                wire.StartEvent(call.request_id, wire.CacheDisposition.MISS, 0, 0, 4096)
+            )
+            process.send(wire.MaskRequestEvent(call.request_id, 1, 2, ()))
+            return call
+
+        def cancelled(call):
+            process.send(
+                wire.DoneEvent(
+                    call.request_id, wire.FinishReason.CANCELLED, 2, 0, 0, 0, 10
+                )
+            )
+
+        abandoned = constrained(1)
+        self.assertTrue(started.wait(1.0))
+        # Cancellation frees the request slot; its mask job keeps running.
+        abandoned.cancel()
+        cancelled(abandoned)
+        abandoned.result(1.0)
+        waiting = constrained(3)
+        process.stdin.wait_for(wire.CancelFrame, count=2)
+        cancelled(waiting)
+        with self.assertRaisesRegex(
+            engine_runtime.MaskComputationFailed, "queue is full"
+        ) as caught:
+            waiting.result(1.0)
+        self.assertTrue(caught.exception.retryable)
+        self.assertTrue(runtime.ready)
+
     def test_correlated_status_and_expired_response(self):
         respond = threading.Event()
 
