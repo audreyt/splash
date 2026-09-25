@@ -8206,8 +8206,12 @@ class ServerTest(unittest.TestCase):
             "/v1/responses",
             self.responses_body(previous_response_id="resp_missing"),
         )
-        self.assertEqual(status, 404)
-        self.assertEqual(json.loads(payload)["error"]["code"], "not_found_error")
+        missing_parent = {
+            "message": "previous response not found",
+            "type": "invalid_request_error",
+            "code": "previous_response_not_found",
+        }
+        self.assertEqual((status, json.loads(payload)["error"]), (404, missing_parent))
         self.assertEqual(runtime.requests, [])
 
         status, _, payload = harness.request(
@@ -8234,8 +8238,22 @@ class ServerTest(unittest.TestCase):
             (status, json.loads(payload)),
             (200, {"id": response_id, "object": "response", "deleted": True}),
         )
-        status, _, _ = harness.request("GET", f"/v1/responses/{response_id}")
-        self.assertEqual(status, 404)
+        status, _, payload = harness.request("GET", f"/v1/responses/{response_id}")
+        self.assertEqual(
+            (status, json.loads(payload)["error"]["code"]), (404, "not_found_error")
+        )
+        status, _, payload = harness.request("DELETE", f"/v1/responses/{response_id}")
+        self.assertEqual(
+            (status, json.loads(payload)["error"]["code"]), (404, "not_found_error")
+        )
+        submitted = len(runtime.requests)
+        status, _, payload = harness.request(
+            "POST",
+            "/v1/responses",
+            self.responses_body(previous_response_id=response_id),
+        )
+        self.assertEqual((status, json.loads(payload)["error"]), (404, missing_parent))
+        self.assertEqual(len(runtime.requests), submitted)
 
         status, _, payload = harness.request(
             "POST",
