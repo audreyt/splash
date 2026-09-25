@@ -1,9 +1,10 @@
 #pragma once
 
 // CPU reference for the GGUF image formats (metal/abi/QuantFormat.h): native
-// blocks, their fp32 values with llama.cpp's dequantize_row_* semantics and
-// the planes the load-time repack writes, and the fp64 bound a GGUF
-// projection's result lies within. Shared by the GGUF tests.
+// blocks, their fp32 values with llama.cpp's dequantize_row_* semantics (MIT
+// notice in THIRD_PARTY_NOTICES) and the planes the load-time repack writes,
+// and the fp64 bound a GGUF projection's result lies within. Shared by the
+// GGUF tests.
 
 #include "metal/abi/QuantFormat.h"
 #include "metal/abi/QuantTables.h"
