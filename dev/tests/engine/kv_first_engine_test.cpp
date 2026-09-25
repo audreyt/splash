@@ -159,6 +159,8 @@ public:
   }
   StateAdmission resume(const ModelRequest &request) override {
     ++resumeAttempts;
+    if (resumeDenied)
+      return {{}, StateFailure::MemoryPressure};
     const uint64_t id = request.id;
     Request &entry = requests.at(id);
     for (uint32_t slot = 0; slot < maximumCells; ++slot) {
@@ -316,6 +318,7 @@ public:
   uint32_t suspensions = 0;
   uint32_t resumptions = 0;
   uint32_t resumeAttempts = 0;
+  bool resumeDenied = false;
   uint32_t maximumCells = model::ExecutionLimits::maximumBatchWidth;
   std::function<void()> beginObserver;
   std::function<void()> restoreObserver;
@@ -2102,9 +2105,10 @@ void testRecoveryDrainDoesNotConsumeResourceWaitBudget() {
     executor.decodeFinishes = false;
     Events events;
     engine::Engine engine({}, resources, executor, events);
+    // The resident's held command is its last one.
     for (uint64_t id : {250, 251}) {
       auto value = request(id, std::vector<uint32_t>(24, id));
-      value.maxNewTokens = 4;
+      value.maxNewTokens = 2;
       value.deadlineMilliseconds = expireRequest ? 30000 : 1000000;
       engine.submit(std::move(value));
     }
@@ -2114,6 +2118,11 @@ void testRecoveryDrainDoesNotConsumeResourceWaitBudget() {
     executor.holdDecodeUntil = std::make_shared<bool>(false);
     require(engine.tick(6) && engine.commandInFlight(),
             "resident peer did not start its command");
+    static_cast<void>(engine.tick(20006));
+    require(engine.resourceWaitSnapshot(20006).draining,
+            "recovery did not drain behind the resident peer");
+    // The drain ends at the resource wait limit, and its time did not count
+    // against the suspended request's own resource wait.
     static_cast<void>(engine.tick(30006));
     require(executor.resumeAttempts == 0,
             "recovery retried while a resident peer was still running");
@@ -2126,9 +2135,9 @@ void testRecoveryDrainDoesNotConsumeResourceWaitBudget() {
       require(events.failedCount == 0 && engine.nextWakeupMilliseconds() > 30006,
               "deliberate drain consumed the resource wait limit");
       const auto wait = engine.resourceWaitSnapshot(30006);
-      require(wait.draining && wait.suspended == 1 && wait.memory == 1 &&
+      require(!wait.draining && wait.suspended == 1 && wait.memory == 1 &&
                   wait.oldestWaitMilliseconds >= 30000,
-              "draining hid the elapsed resource wait from diagnostics");
+              "drain outlived its limit or hid the elapsed resource wait");
     }
     *executor.holdDecodeUntil = true;
     for (double now = 30007; now < 30100 && !engine.idle(); ++now)
@@ -2710,6 +2719,108 @@ EngineRequest constrainedRequest(uint64_t id, double deadline = 10'000.0) {
   value.constraint = ConstraintMode::TokenMask;
   value.deadlineMilliseconds = deadline;
   return value;
+}
+
+// After a suspension, admission waits for resident lanes only while memory
+// stays short. Once host pressure clears with nothing failing since, the
+// suspended request resumes and new work starts beside the residents. While
+// pressure persists, an allocation fails again, or growth met a limit that
+// only freed memory lifts, the drain lasts at most the resource wait limit;
+// the suspended request then waits beside the residents, within its own
+// resource wait.
+void testRecoveryDrainEndsWithItsCause() {
+  enum class Cause {
+    PressureClears,
+    KvStillShort,
+    StateStillShort,
+    PressurePersists,
+    HardLimit
+  };
+  for (Cause cause : {Cause::PressureClears, Cause::KvStillShort,
+                      Cause::StateStillShort, Cause::PressurePersists,
+                      Cause::HardLimit}) {
+    Backing backing(64);
+    KvPool pool(backing);
+    engine::Cache resources(pool, CacheNamespace{});
+    Executor executor;
+    Events events;
+    bool paused = false;
+    EngineConfig config;
+    config.resourceWaitTimeoutMilliseconds = 1000;
+    config.growthPaused = [&] { return paused; };
+    engine::Engine engine(config, resources, executor, events);
+    // A resident lane waits for its initial mask without a command in
+    // flight; the other fills the first extent and must map another.
+    auto resident = constrainedRequest(1, 100'000);
+    resident.priority = RequestPriority::Background;
+    engine.submit(std::move(resident));
+    auto growing = request(2, std::vector<uint32_t>(95, 2));
+    growing.priority = RequestPriority::Background;
+    growing.maxNewTokens = 1000;
+    growing.deadlineMilliseconds = 100'000;
+    engine.submit(std::move(growing));
+    for (double now = 1; now <= 6; ++now)
+      static_cast<void>(engine.tick(now));
+    require(events.maskRequests.size() == 1 &&
+                engine.snapshot().scheduler.decoding == 1,
+            "fixture lanes did not reach their mask wait and decode");
+    paused = cause != Cause::HardLimit;
+    backing.growthBlocked = true;
+    require(engine.tick(7) && executor.suspensions == 1 &&
+                executor.requests.at(1).resident,
+            "denied growth did not suspend the lane beside the resident");
+    auto urgent = request(3, {3});
+    urgent.priority = RequestPriority::Foreground;
+    urgent.deadlineMilliseconds = 100'000;
+    engine.submit(std::move(urgent));
+
+    const bool pauseLifts = cause == Cause::PressureClears ||
+                            cause == Cause::KvStillShort ||
+                            cause == Cause::StateStillShort;
+    if (pauseLifts)
+      paused = false;
+    if (cause == Cause::PressureClears || cause == Cause::StateStillShort)
+      backing.growthBlocked = false;
+    executor.resumeDenied = cause == Cause::StateStillShort;
+    if (cause == Cause::PressureClears) {
+      for (double now = 8; now < 120 && events.startIds.size() < 3; ++now)
+        static_cast<void>(engine.tick(now));
+      require(events.startIds == std::vector<uint64_t>({1, 2, 3}) &&
+                  executor.resumptions == 1 && executor.requests.at(1).resident,
+              "cleared pressure kept new work waiting for the residents");
+    } else {
+      // Only a lifted pause lets the suspended request retry at 107; a
+      // failure there resumes the drain.
+      for (double now = 8; now <= 107; ++now)
+        static_cast<void>(engine.tick(now));
+      const uint32_t retried = executor.resumeAttempts;
+      require((retried != 0) == pauseLifts,
+              "suspended request retried while the drain held");
+      for (double now = 108; now < 1007; ++now)
+        static_cast<void>(engine.tick(now));
+      require(engine.resourceWaitSnapshot(1006).draining &&
+                  executor.resumeAttempts == retried &&
+                  engine.nextWakeupMilliseconds() == 1007.0,
+              "drain did not hold while memory stayed short");
+      static_cast<void>(engine.tick(1007));
+      require(!engine.resourceWaitSnapshot(1007).draining &&
+                  executor.resumeAttempts > retried &&
+                  events.startIds.size() == 2,
+              "drain outlasted the resource wait limit");
+      for (double now = 1008; now < 2010 && events.startIds.size() < 3; ++now)
+        static_cast<void>(engine.tick(now));
+      require(events.failures == std::vector<std::string>{"resource_timeout"} &&
+                  events.capacityExhaustedCount == 0 &&
+                  events.startIds.back() == 3,
+              "suspended request's wait was not bounded after the drain");
+    }
+    for (uint64_t id : {1, 2, 3})
+      engine.cancel(id);
+    for (double now = 2010; now < 2030 && !engine.idle(); ++now)
+      static_cast<void>(engine.tick(now));
+    require(engine.idle() && resources.snapshot().activeRequests == 0,
+            "recovery drain fixture leaked its lanes");
+  }
 }
 
 void testConstraintMaskOverlapsInsideOneSchedulerBatch() {
@@ -3511,6 +3622,7 @@ int main() {
     testPrefillGrowthPreservesAnActiveDecodePeer();
     testPhysicalKvPressureSuspendsInsteadOfKillingActiveWork();
     testRecoveryDrainDoesNotConsumeResourceWaitBudget();
+    testRecoveryDrainEndsWithItsCause();
     testPhysicalPressureRetryIsBackedOffWithoutProgress();
     testAdmissionRetryWakesOnlyWhenTickCanRetry();
     testDecodePreemptionReplaysCommittedHistoryWithoutRepeatingOutput();
