@@ -133,14 +133,24 @@ MemoryAuditResult auditActualMemory(const EngineMemoryPlan &plan,
         "pipeline and runtime allocations exceed their explicit reserve",
         actual);
   }
-  uint64_t difference =
-      actual.devicePeakAllocatedBytes > actual.estimatedWarmupPeakBytes
-          ? actual.devicePeakAllocatedBytes - actual.estimatedWarmupPeakBytes
-          : actual.estimatedWarmupPeakBytes - actual.devicePeakAllocatedBytes;
+  // The warmup estimate adds the reserves as the bound on unclassified
+  // memory; the device peak holds that memory as it is. Compare the two with
+  // the measured unclassified bytes in place of the reserves, so that the
+  // rule measures the estimate rather than the reserves' unused part.
+  if (actual.estimatedWarmupPeakBytes <= reserves) {
+    return fail(MemoryAuditError::WarmupEstimateDeviation,
+                "warmup estimate does not include the runtime reserves",
+                actual);
+  }
+  const uint64_t predicted =
+      actual.estimatedWarmupPeakBytes - reserves + unclassified;
+  uint64_t difference = actual.devicePeakAllocatedBytes > predicted
+                            ? actual.devicePeakAllocatedBytes - predicted
+                            : predicted - actual.devicePeakAllocatedBytes;
   uint64_t basisPoints =
       difference > std::numeric_limits<uint64_t>::max() / 10'000
           ? std::numeric_limits<uint64_t>::max()
-          : difference * 10'000 / actual.estimatedWarmupPeakBytes;
+          : difference * 10'000 / predicted;
   if (basisPoints > kMaximumWarmupDeviationBasisPoints) {
     return fail(
         MemoryAuditError::WarmupEstimateDeviation,

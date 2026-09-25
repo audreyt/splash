@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 
 using namespace splash;
 using namespace splash::engine;
@@ -52,7 +53,10 @@ ActualMemoryReport report(const EngineMemoryPlan &memoryPlan,
       result.kvResidentBytes + unclassifiedBytes;
   result.deviceCurrentAllocatedBytes = result.backendAllocatedBytes;
   result.devicePeakAllocatedBytes = result.backendAllocatedBytes + 16 * kMiB;
-  result.estimatedWarmupPeakBytes = result.devicePeakAllocatedBytes;
+  // Warmup estimates the categories' peak and adds the reserves.
+  result.estimatedWarmupPeakBytes = result.devicePeakAllocatedBytes -
+                                    unclassifiedBytes + b.pipelineReserveBytes +
+                                    b.runtimeOverheadReserveBytes;
   return result;
 }
 
@@ -125,6 +129,59 @@ void testFixedCategoryAndPeakFailures() {
           "bad warmup estimate was accepted");
 }
 
+// The reserves bound the memory no category covers; they do not predict it.
+// A correct warmup passes whatever part of them that memory takes, however
+// small the model, and a real estimate error still fails.
+void testWarmupDeviationExcludesReserves() {
+  DeviceCapabilities device;
+  device.deviceName = "test";
+  device.appleGpuFamily = 9;
+  device.macosMajor = 26;
+  device.macosMinor = 4;
+  device.physicalMemoryBytes = 64 * kGiB;
+  device.recommendedMaxWorkingSetBytes = 48 * kGiB;
+  device.maxBufferLengthBytes = 48 * kGiB;
+  device.maxThreadgroupMemoryBytes = 32 * 1024;
+  device.maxThreadgroupWidth = 1024;
+  device.hasUnifiedMemory = true;
+  device.supportsPlacementSparse = true;
+  for (const uint64_t weightsMiB : {16'589, 12'288, 9'216, 6'144}) {
+    for (const uint64_t untrackedMiB : {100, 300}) {
+      const auto memoryPlan = requireEngineMemoryPlan(
+          device, test::modelMemoryProfile(weightsMiB * kMiB, 1, 0));
+      const auto &b = memoryPlan.breakdown();
+      ActualMemoryReport actual;
+      actual.targetWeightsBytes = b.targetWeightsBytes;
+      actual.draftWeightsBytes = b.draftWeightsBytes;
+      actual.stateResidentBytes = 4 * b.activeStateCellBytes;
+      actual.sharedPrefillBytes = b.sharedPrefillBytes;
+      actual.sharedDecodeBytes = b.sharedDecodeBytes;
+      actual.kvResidentBytes = b.kvExtentBytes;
+      actual.backendAllocatedBytes =
+          actual.targetWeightsBytes + actual.draftWeightsBytes +
+          actual.stateResidentBytes + actual.sharedPrefillBytes +
+          actual.sharedDecodeBytes + actual.kvResidentBytes;
+      actual.deviceCurrentAllocatedBytes =
+          actual.backendAllocatedBytes + untrackedMiB * kMiB;
+      actual.devicePeakAllocatedBytes = actual.deviceCurrentAllocatedBytes;
+      actual.estimatedWarmupPeakBytes = actual.backendAllocatedBytes +
+                                        b.pipelineReserveBytes +
+                                        b.runtimeOverheadReserveBytes;
+      const std::string model = std::to_string(weightsMiB) +
+                                " MiB of weights, " +
+                                std::to_string(untrackedMiB) + " MiB untracked";
+      const auto audit = auditActualMemory(memoryPlan, actual);
+      require(audit.valid && audit.warmupPeakDeviationBasisPoints == 0,
+              (model + ": correct warmup failed the estimate gate").c_str());
+      actual.devicePeakAllocatedBytes +=
+          actual.deviceCurrentAllocatedBytes / 16;
+      require(auditActualMemory(memoryPlan, actual).error ==
+                  MemoryAuditError::WarmupEstimateDeviation,
+              (model + ": a 6% estimate error passed").c_str());
+    }
+  }
+}
+
 } // namespace
 
 int main() {
@@ -133,6 +190,7 @@ int main() {
     testOptionalVisionAudit();
     testUnreportedAllocationsCountAgainstReserves();
     testFixedCategoryAndPeakFailures();
+    testWarmupDeviationExcludesReserves();
     std::cout << "elastic memory audit tests passed\n";
     return EXIT_SUCCESS;
   } catch (const std::exception &error) {

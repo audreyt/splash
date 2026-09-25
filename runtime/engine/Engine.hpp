@@ -27,7 +27,8 @@ struct EngineConfig final {
   uint32_t maxImagePatches = ops::kMaximumImagePatches;
   double resourceWaitTimeoutMilliseconds = 30000.0;
   // Host growth admission, supplied by the runtime governor. Queried only on
-  // failed allocation, never on the successful decode path.
+  // failed allocation and, after a suspension the pause caused, while
+  // resident lanes drain; never on the ordinary decode path.
   std::function<bool()> growthPaused;
 };
 
@@ -188,6 +189,7 @@ private:
   [[nodiscard]] bool budgetMayRecover(metal::AllocationFailure failure,
                                       uint64_t generation, bool reclaimed) const;
   void suspendForGrowth(Request &request, uint64_t workEnd,
+                        metal::AllocationFailure failure,
                         double nowMilliseconds);
   [[nodiscard]] bool resourceRetryReady(const Request &request,
                                         double nowMilliseconds) const noexcept;
@@ -209,12 +211,19 @@ private:
   EngineEventSink &events_;
   Scheduler scheduler_;
   std::unordered_map<uint64_t, Request> requests_;
-  // Pressure preempted work and a resident lane still holds its state cell.
+  // Pressure preempted work, a resident lane still holds its state cell, and
+  // memory is still short (growth is paused or allocationFailed_), up to the
+  // drain's end.
   [[nodiscard]] bool drainingForRecovery() const;
   std::function<void()> completionNotifier_;
   std::optional<Pending> pending_;
   uint64_t resourceEpoch_ = 1;
-  bool recoveringResources_ = false;
+  // The resource wait limit after the latest suspension; zero once passed
+  // or when no request is suspended.
+  double drainEndMilliseconds_ = 0.0;
+  // An allocation failed since the latest suspension, or the suspension
+  // itself met a limit that only freed memory lifts, unlike a host pause.
+  bool allocationFailed_ = false;
   EngineSnapshot counters_;
 };
 

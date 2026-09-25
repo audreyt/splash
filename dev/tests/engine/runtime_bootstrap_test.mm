@@ -272,7 +272,10 @@ ActualMemoryReport validActual(const EngineMemoryPlan &plan) {
       actual.sharedDecodeBytes + actual.kvResidentBytes;
   actual.deviceCurrentAllocatedBytes = actual.backendAllocatedBytes;
   actual.devicePeakAllocatedBytes = actual.backendAllocatedBytes;
-  actual.estimatedWarmupPeakBytes = actual.backendAllocatedBytes;
+  // Model warmup estimates add the pipeline and runtime reserves.
+  actual.estimatedWarmupPeakBytes = actual.backendAllocatedBytes +
+                                    budget.pipelineReserveBytes +
+                                    budget.runtimeOverheadReserveBytes;
   return actual;
 }
 
@@ -399,7 +402,7 @@ public:
           int throwingStep = -1, bool failReadyWrite = false)
       : backing_(16), pool_(backing_),
         resources_(pool_, CacheNamespace{}),
-        executor_(validActual(plan).devicePeakAllocatedBytes, failingStep,
+        executor_(validActual(plan).estimatedWarmupPeakBytes, failingStep,
                   throwingStep),
         loop_(
             loopConfig(), resources_, executor_,
@@ -439,7 +442,7 @@ void testAllNativeWarmupsPrecedeReady() {
   auto report = engine::RuntimeBootstrap::requireWarmupAndAnnounce(
       plan, harness.executor(),
       [&](uint64_t estimate) {
-        require(estimate == actual.devicePeakAllocatedBytes,
+        require(estimate == actual.estimatedWarmupPeakBytes,
                 "bootstrap lost the maximum measured peak");
         actual.estimatedWarmupPeakBytes = estimate;
         return actual;
@@ -765,6 +768,39 @@ void testExceptionsMemoryAndReadyWriteAreFailClosed() {
   }
 }
 
+void testStartupRetryWindowOpensAtFirstFailure() {
+  using namespace std::chrono_literals;
+  RuntimeBootstrapReport failure;
+  failure.resourceFailure = RuntimeResourceFailure::HostCapacity;
+  StartupRetryWindow window(30s);
+  // A cold start fails for the first time after minutes of preparation.
+  const auto first = StartupRetryWindow::Clock::time_point{} + 5min;
+  require(window.retryUntil(failure, first) == first + 30s &&
+              window.retryUntil(failure, first + 29s) == first + 30s &&
+              !window.retryUntil(failure, first + 30s),
+          "the startup retry window did not open at the first failure");
+  // A retry that fails later in startup made progress: a new window opens.
+  // Failing again at that stage or before does not extend it.
+  failure.stage = RuntimeBootstrapStage::MaximumPrefill;
+  require(window.retryUntil(failure, first + 40s) == first + 70s,
+          "progress to a later startup stage did not open a new window");
+  for (auto stage : {RuntimeBootstrapStage::MaximumPrefill,
+                     RuntimeBootstrapStage::ResourceAssembly}) {
+    failure.stage = stage;
+    require(window.retryUntil(failure, first + 50s) == first + 70s,
+            "a failure without progress extended the retry window");
+  }
+  failure.resourceFailure = RuntimeResourceFailure::DriverAllocation;
+  require(StartupRetryWindow(30s).retryUntil(failure, first) == first + 30s,
+          "a driver allocation failure was not retried");
+  for (auto other : {RuntimeResourceFailure::Other,
+                     RuntimeResourceFailure::EngineCapacity}) {
+    failure.resourceFailure = other;
+    require(!StartupRetryWindow(30s).retryUntil(failure, first),
+            "a failure that cannot recover was retried");
+  }
+}
+
 } // namespace
 
 int main() {
@@ -782,6 +818,7 @@ int main() {
     testEveryWarmupFailureIsFailClosed();
     testWarmupErrorsCannotMasqueradeAsMemoryLimits();
     testExceptionsMemoryAndReadyWriteAreFailClosed();
+    testStartupRetryWindowOpensAtFirstFailure();
     std::cout << "native bootstrap tests passed\n";
     return EXIT_SUCCESS;
   } catch (const std::exception &error) {

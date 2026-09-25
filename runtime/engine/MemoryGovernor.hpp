@@ -10,21 +10,20 @@
 namespace splash::engine {
 
 struct HostMemoryPages {
-  uint64_t active = 0;
-  uint64_t inactive = 0;
+  // Mach's free_count, which includes the speculative pages.
+  uint64_t free = 0;
   uint64_t speculative = 0;
-  uint64_t wired = 0;
-  uint64_t compressor = 0;
   uint64_t fileBacked = 0;
   uint64_t purgeable = 0;
 };
 
-// Physical memory minus used pages, crediting pageable file-backed and
-// purgeable pages regardless of active/inactive status. The governor also
-// enforces the engine budget, host reserve and system pressure.
+// The pages macOS can hand out without compressing or swapping: free pages
+// plus pageable file-backed and purgeable pages, regardless of
+// active/inactive status. Memory in no VM queue (the firmware carve-out, tag
+// storage) is never available. The governor also enforces the engine
+// budget, host reserve and system pressure.
 [[nodiscard]] uint64_t estimateHostAvailableMemory(
-    const HostMemoryPages &pages, uint64_t pageSize,
-    uint64_t physicalMemoryBytes) noexcept;
+    const HostMemoryPages &pages, uint64_t pageSize) noexcept;
 [[nodiscard]] std::optional<uint64_t> queryHostAvailableMemory() noexcept;
 
 enum class MemoryPressure : uint8_t {
@@ -57,6 +56,8 @@ inline constexpr uint64_t kHostRecoveryMarginBytes = 2ULL << 30;
 
 struct MemoryGovernorSnapshot {
   uint64_t limitBytes = 0;
+  // Charged against the limit: the backend's resident buffers plus the
+  // untracked reserve, or the device's allocation when that is larger.
   uint64_t observedResidentBytes = 0;
   uint64_t reservedBytes = 0;
   uint64_t headroomBytes = 0;
@@ -128,9 +129,13 @@ public:
 
   MemoryGovernor(metal::MetalBackend &backend, uint64_t limitBytes,
                  uint64_t hostReserveBytes);
+  // Metal memory outside the backend's buffers (pipelines, driver
+  // allocations) is charged only beyond untrackedReserveBytes, the part of
+  // the limit the caller has set aside for it.
   MemoryGovernor(metal::MetalBackend &backend, uint64_t limitBytes,
                  uint64_t hostReserveBytes,
-                 HostAvailableMemoryProvider hostAvailableMemory);
+                 HostAvailableMemoryProvider hostAvailableMemory,
+                 uint64_t untrackedReserveBytes = 0);
 
   [[nodiscard]] std::optional<Reservation> tryReserve(
       uint64_t bytes, metal::AllocationFailure *failure = nullptr);
@@ -157,6 +162,7 @@ private:
   uint64_t limitBytes_ = 0;
   uint64_t hostReserveBytes_ = 0;
   HostAvailableMemoryProvider hostAvailableMemory_;
+  uint64_t untrackedReserveBytes_ = 0;
   mutable std::mutex mutex_;
   uint64_t reservedBytes_ = 0;
   uint64_t deniedReservations_ = 0;

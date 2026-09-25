@@ -1,4 +1,5 @@
 #include "engine/RuntimeResources.hpp"
+#include "engine/Checked.hpp"
 #include "metal/abi/ExecutionGeometry.h"
 
 #import <Foundation/Foundation.h>
@@ -314,16 +315,28 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
   };
   backend->setOperationGuard(admitMetalOperation);
   try {
-    const uint64_t modelBytes =
-        model::preparedModelWeightBytes(config.modelRoot, config.model);
     const uint64_t hardBudgetBytes = EngineMemoryPolicy::hardBudgetBytes(
         device.recommendedMaxWorkingSetBytes, config.maximumMemoryBytes);
-    // Reject an impossible weight budget before registering model buffers.
-    // The full plan below still uses measured allocations and runtime costs.
-    if (modelBytes > hardBudgetBytes) {
+    // Reject a model that cannot fit before preparing or registering its
+    // weights. Beside them the plan needs at least the runtime reserves, one
+    // state cell and one KV extent; the full plan below adds the arenas.
+    kv::Layout kvLayout = config.model.targetKvLayout;
+    kvLayout.format = config.kvFormat;
+    uint64_t requiredBytes = 0;
+    for (const uint64_t bytes :
+         {model::preparedModelWeightBytes(config.modelRoot, config.model),
+          model::kPipelineReserveBytes, model::kRuntimeOverheadReserveBytes,
+          config.model.stateLayout.activeCellBytes(),
+          uint64_t{kvLayout.backingExtentPages()} *
+              kvLayout.bytesPerModelPage()}) {
+      if (!checkedAdd(requiredBytes, bytes, requiredBytes))
+        requiredBytes = std::numeric_limits<uint64_t>::max();
+    }
+    if (requiredBytes > hardBudgetBytes) {
       throw RuntimeResourcesError(
           RuntimeResourceStage::MemoryPlanning,
-          "model weights require " + std::to_string(modelBytes) +
+          "model weights with the runtime reserves, one state cell and one "
+          "KV extent require " + std::to_string(requiredBytes) +
               " bytes but the Metal memory budget is " +
               std::to_string(hardBudgetBytes) + " bytes",
           deviceStatusJson(device), {}, RuntimeResourceFailure::EngineCapacity);
@@ -420,16 +433,13 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
     const EngineMemoryBreakdown &baselineBudget = baselineMemoryPlan.breakdown();
     const uint64_t runtimeReserve =
         baselineBudget.pipelineReserveBytes + baselineBudget.runtimeOverheadReserveBytes;
-    if (baselineBudget.hardBudgetBytes <= runtimeReserve) {
-      throw std::logic_error("runtime reserves consume the Metal budget");
-    }
-    // The governor observes the complete Metal footprint. Keeping explicit
-    // pipeline/allocator reserves outside its growth ceiling prevents elastic
-    // state and KV from silently consuming the startup safety margin.
-    const uint64_t elasticGrowthCeiling =
-        baselineBudget.hardBudgetBytes - runtimeReserve;
+    // The governor holds the complete Metal footprint to the hard budget. The
+    // plan budgets pipelines and driver allocations inside the pipeline and
+    // allocator reserves, so memory outside the backend's buffers is charged
+    // only beyond them, and elastic state and KV never grow into them.
     auto memoryGovernor = std::make_unique<MemoryGovernor>(
-        *backend, elasticGrowthCeiling, hostReserveBytes, hostAvailableMemory);
+        *backend, baselineBudget.hardBudgetBytes, hostReserveBytes,
+        hostAvailableMemory, runtimeReserve);
     if (config.memoryPressure)
       memoryGovernor->setPressure(config.memoryPressure());
     std::string rejected;

@@ -95,9 +95,6 @@ public:
   void endRequest(uint64_t requestId);
 
   // Scheduling probe only: does not pin, touch recency, or count a hit.
-  [[nodiscard]] uint32_t
-  cachedTokens(std::span<const uint32_t> prompt,
-               std::span<const ImageSpan> images = {}) const;
   [[nodiscard]] CacheProbe
   probe(std::span<const uint32_t> prompt,
         std::span<const ImageSpan> images = {}) const;
@@ -135,8 +132,8 @@ public:
   // state-free KV leaves retain their shared oldest-first access order.
   // Active requests and pinned restores are never selected. Physical release
   // is paced by the backing: while an earlier release is still being torn
-  // down, this pass stops instead of evicting cache whose extents could not
-  // be released yet; the caller retries once releaseDeferred() clears.
+  // down, the pass evicts only until an extent is empty and stops there; the
+  // caller retries, releasing that extent, once releaseDeferred() clears.
   // keepResumePoint stops short of the newest state publication. A shrink
   // that no request is waiting for gains the one cell that publication holds
   // and costs the next request a replay of its whole prompt, because a

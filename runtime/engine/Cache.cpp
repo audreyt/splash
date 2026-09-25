@@ -58,15 +58,6 @@ Cache::matchedBlocks(std::span<const uint32_t> prompt,
   return blocks;
 }
 
-uint32_t Cache::cachedTokens(std::span<const uint32_t> prompt,
-                             std::span<const ImageSpan> images) const {
-  const auto blocks = matchedBlocks(prompt, images);
-  for (size_t i = blocks.size(); i > 0; --i)
-    if (states_.contains(blocks[i - 1]))
-      return static_cast<uint32_t>(i * KvCache::pageTokens);
-  return 0;
-}
-
 CacheProbe Cache::probe(std::span<const uint32_t> prompt,
                         std::span<const ImageSpan> images) const {
   CacheProbe result;

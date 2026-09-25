@@ -249,7 +249,8 @@ bootstrapConfig(const NativeArguments &arguments) {
 
 // SIGTERM, SIGINT and SIGHUP end the transport loop instead of killing the
 // process, so the KV backing is released one extent at a time by the normal
-// destructors. SIGPIPE is ignored: a closed parent pipe surfaces as EPIPE,
+// destructors. An inherited ignored SIGHUP (nohup) stays ignored, as it does
+// for the server. SIGPIPE is ignored: a closed parent pipe surfaces as EPIPE,
 // which the transport already reports as an I/O failure.
 std::atomic<engine::FdTransport *> gShutdownTransport{nullptr};
 
@@ -272,8 +273,13 @@ public:
     action.sa_handler = requestShutdownFromSignal;
     sigemptyset(&action.sa_mask);
     action.sa_flags = 0;
-    for (const int number : {SIGTERM, SIGINT, SIGHUP})
+    for (const int number : {SIGTERM, SIGINT, SIGHUP}) {
+      struct sigaction inherited {};
+      if (number == SIGHUP && sigaction(number, nullptr, &inherited) == 0 &&
+          inherited.sa_handler == SIG_IGN)
+        continue;
       sigaction(number, &action, nullptr);
+    }
     std::signal(SIGPIPE, SIG_IGN);
   }
   ShutdownSignals(const ShutdownSignals &) = delete;
@@ -305,8 +311,7 @@ int runNative(const NativeArguments &arguments) {
         published->nativeLoop().resourceWaitSnapshot());
   };
 
-  const auto recoveryDeadline =
-      std::chrono::steady_clock::now() + kStartupMemoryRecoveryTimeout;
+  engine::StartupRetryWindow recovery(kStartupMemoryRecoveryTimeout);
   bool reportedRecoveryWait = false;
   std::unique_ptr<engine::RuntimeBootstrap> bootstrap;
   while (!bootstrap) {
@@ -323,12 +328,9 @@ int runNative(const NativeArguments &arguments) {
       if (transport.shutdownRequested())
         return static_cast<int>(engine::NativeProcessExit::CleanEof);
       const auto now = std::chrono::steady_clock::now();
-      const auto failure = error.report().resourceFailure;
-      if ((failure != engine::RuntimeResourceFailure::HostCapacity &&
-           failure != engine::RuntimeResourceFailure::DriverAllocation) ||
-          now >= recoveryDeadline) {
+      const auto recoveryDeadline = recovery.retryUntil(error.report(), now);
+      if (!recoveryDeadline)
         throw;
-      }
       if (!reportedRecoveryWait) {
         std::cerr
             << "Waiting for sufficient available memory to start; "
@@ -337,7 +339,7 @@ int runNative(const NativeArguments &arguments) {
       }
       const auto resumeAt = std::min(
           now + std::chrono::steady_clock::duration(kStartupMemoryRecoveryPoll),
-          recoveryDeadline);
+          *recoveryDeadline);
       while (std::chrono::steady_clock::now() < resumeAt &&
              !transport.shutdownRequested()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));

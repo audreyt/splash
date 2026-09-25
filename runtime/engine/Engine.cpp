@@ -167,6 +167,8 @@ bool Engine::tick(double now) {
   model_.checkHealth();
   nextHealthCheckMilliseconds_ = now + kHealthCheckIntervalMilliseconds;
   bool progressed = scheduler_.expireDeadlines(now);
+  if (now >= drainEndMilliseconds_)
+    drainEndMilliseconds_ = 0.0;
   const bool draining = drainingForRecovery();
   for (auto &[_, active] : requests_) {
     // Admission is deliberately paused while resident peers finish. Start a
@@ -241,10 +243,12 @@ bool Engine::tick(double now) {
 bool Engine::idle() const noexcept { return requests_.empty() && !pending_; }
 
 bool Engine::drainingForRecovery() const {
-  return recoveringResources_ &&
-         std::any_of(requests_.begin(), requests_.end(), [](const auto &entry) {
-           return entry.second.stateCell.has_value();
-         });
+  return drainEndMilliseconds_ > 0.0 &&
+         std::any_of(requests_.begin(), requests_.end(),
+                     [](const auto &entry) {
+                       return entry.second.stateCell.has_value();
+                     }) &&
+         (allocationFailed_ || growthPaused());
 }
 
 std::optional<double> Engine::nextWakeupMilliseconds() const {
@@ -252,6 +256,14 @@ std::optional<double> Engine::nextWakeupMilliseconds() const {
   if (pending_ || model_.needsHealthCheck())
     result = nextHealthCheckMilliseconds_;
   const bool draining = drainingForRecovery();
+  if (draining && (!result || drainEndMilliseconds_ < *result))
+    result = drainEndMilliseconds_;
+  // Admission retries run only between commands, and after a suspension only
+  // for suspended requests. Other retry times would wake the loop with
+  // nothing to do; the command completion or resumption wakes it instead.
+  const bool recovering = std::any_of(
+      requests_.begin(), requests_.end(),
+      [](const auto &entry) { return entry.second.suspended; });
   for (const auto &[_, active] : requests_) {
     if (active.finalized || active.failure)
       continue;
@@ -260,7 +272,8 @@ std::optional<double> Engine::nextWakeupMilliseconds() const {
     if (!draining && active.resourceWait.deadlineMilliseconds > 0.0 &&
         (!result || active.resourceWait.deadlineMilliseconds < *result))
       result = active.resourceWait.deadlineMilliseconds;
-    if (draining || active.resourceWait.retryMilliseconds <= 0.0)
+    if (draining || pending_ || (recovering && !active.suspended) ||
+        active.resourceWait.retryMilliseconds <= 0.0)
       continue;
     const double wakeup = active.resourceWait.epoch == resourceEpoch_
                               ? active.resourceWait.retryMilliseconds
@@ -302,11 +315,14 @@ bool Engine::admitQueued(double now) {
   const bool recovering = std::any_of(
       requests_.begin(), requests_.end(),
       [](const auto &entry) { return entry.second.suspended; });
-  // Once pressure has preempted work, let resident lanes finish before
-  // spending their released headroom on a retry or a new request. Recover
-  // one lane at a time; this prevents repeated B4 admission/preemption churn.
+  // Once pressure has preempted work, let resident lanes finish while memory
+  // is still short before spending their released headroom on a retry or a
+  // new request; this prevents repeated B4 admission/preemption churn. The
+  // drain ends when growth is no longer paused and nothing has failed since
+  // the suspension, and at the latest after the resource wait limit;
+  // suspended requests are then admitted before new work, one at a time.
   if (!recovering)
-    recoveringResources_ = false;
+    drainEndMilliseconds_ = 0.0;
   if (drainingForRecovery())
     return false;
   const std::vector<uint64_t> order = scheduler_.admissionOrder();
@@ -319,11 +335,23 @@ bool Engine::admitQueued(double now) {
     return false;
   }
 
+  // A request starts only in a free state cell. While every cell is
+  // resident, record each wait as a failed admission would, without hashing
+  // the waiting prompts again.
+  const bool cellsFull =
+      std::count_if(requests_.begin(), requests_.end(), [](const auto &entry) {
+        return entry.second.stateCell.has_value();
+      }) >= model::ExecutionLimits::maximumBatchWidth;
   std::vector<PrefillAdmission> candidates;
   for (uint64_t id : order) {
     Request &active = request(id);
     if (!resourceRetryReady(active, now))
       continue;
+    if (cellsFull) {
+      scheduler_.waitForResources(id);
+      deferResourceRetry(active, now, StateFailure::ConcurrencyLimit);
+      continue;
+    }
     active.admissionProbe =
         cache_.probe(active.request.prompt, active.request.images);
     const uint32_t cached = active.admissionProbe->cachedTokens();
@@ -425,6 +453,13 @@ bool Engine::admit(Request &active, double now) {
     const auto activate = [&] {
       return resuming ? model_.resume(modelRequest) : model_.begin(modelRequest);
     };
+    // Memory a resident lane holds returns when it finishes.
+    const auto anotherResident = [&] {
+      return std::any_of(
+          requests_.begin(), requests_.end(), [&](const auto &entry) {
+            return entry.first != active.request.id && entry.second.stateCell;
+          });
+    };
     const uint64_t releaseGeneration = cache_.releaseGeneration();
     StateAdmission admission = activate();
     bool reclaimedForAdmission = false;
@@ -449,16 +484,14 @@ bool Engine::admit(Request &active, double now) {
       break;
     }
     if (!admission.granted()) {
+      if (admission.failure == StateFailure::MemoryPressure)
+        allocationFailed_ = true;
       const bool terminalAllocation =
           admission.allocationFailure == metal::AllocationFailure::EngineBudget ||
           admission.allocationFailure == metal::AllocationFailure::DriverRejected;
-      const bool anotherResident = std::any_of(
-          requests_.begin(), requests_.end(), [&](const auto &entry) {
-            return entry.first != active.request.id && entry.second.stateCell;
-          });
       const bool releasingBudget = budgetMayRecover(
           admission.allocationFailure, releaseGeneration, reclaimedForAdmission);
-      if (terminalAllocation && !growthPaused() && !anotherResident &&
+      if (terminalAllocation && !growthPaused() && !anotherResident() &&
           !releasingBudget) {
         finishFailure(active,
                       {"capacity_exhausted",
@@ -489,7 +522,7 @@ bool Engine::admit(Request &active, double now) {
         cache_.endRequest(active.request.id);
         active.stateCell.reset();
         executorStarted = resourcesStarted = false;
-        if (!growthPaused() && !retryableBudget &&
+        if (!growthPaused() && !retryableBudget && !anotherResident() &&
             kv.allocationFailure != metal::AllocationFailure::HostPressure) {
           finishCapacity(active, kv);
           return true;
@@ -877,7 +910,8 @@ bool Engine::prepare(BatchPlan &plan, std::vector<ModelBatchItem> &items,
   if (growthPaused() || anotherResident || victim.retryableBudget ||
       victim.admission.allocationFailure ==
           metal::AllocationFailure::HostPressure) {
-    suspendForGrowth(active, resumeTarget, now);
+    suspendForGrowth(active, resumeTarget, victim.admission.allocationFailure,
+                     now);
     return false;
   }
   finishCapacity(request(victim.requestId), victim.admission);
@@ -900,6 +934,8 @@ Engine::KvAdmission Engine::admitKv(Request &active, uint64_t workEnd) {
     reclaimed = true;
     admission = cache_.ensureTokens(active.request.id, workEnd);
   }
+  if (!admission.granted())
+    allocationFailed_ = true;
   return {admission,
           !admission.granted() &&
               budgetMayRecover(admission.allocationFailure, releaseGeneration,
@@ -966,7 +1002,8 @@ bool Engine::reuseIdleBackingWhilePaused(const TokenAdmission &admission) {
   return reused.madeProgress;
 }
 
-void Engine::suspendForGrowth(Request &active, uint64_t workEnd, double now) {
+void Engine::suspendForGrowth(Request &active, uint64_t workEnd,
+                              metal::AllocationFailure failure, double now) {
   if (!active.stateCell || active.suspended) {
     throw std::logic_error("request cannot be suspended for growth");
   }
@@ -979,7 +1016,12 @@ void Engine::suspendForGrowth(Request &active, uint64_t workEnd, double now) {
   active.stateCell.reset();
   active.suspended = true;
   active.resumeKvTargetTokens = workEnd;
-  recoveringResources_ = true;
+  // Resident lanes drain before admission resumes. Growth denied by the
+  // host's pressure resumes when the pause lifts; any other limit only once
+  // memory is freed, so it counts as a failure the drain waits out.
+  drainEndMilliseconds_ = now + config_.resourceWaitTimeoutMilliseconds;
+  allocationFailed_ = !growthPaused() &&
+                      failure != metal::AllocationFailure::HostPressure;
   active.replayTokens = static_cast<uint32_t>(active.exactTokens.size());
   scheduler_.suspendForResources(active.request.id);
   deferResourceRetry(active, now);

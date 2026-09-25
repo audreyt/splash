@@ -79,6 +79,7 @@ TEST_RESOURCES_TEST := $(ENGINE_TEST_BUILD)/runtime-resources
 TEST_METRICS_TEST := $(ENGINE_TEST_BUILD)/runtime-metrics
 TEST_MODEL_PACKAGE_TEST := $(ENGINE_TEST_BUILD)/model-package
 TEST_MEMORY_AUDIT_TEST := $(ENGINE_TEST_BUILD)/memory-audit
+TEST_MEMORY_GOVERNOR_TEST := $(ENGINE_TEST_BUILD)/memory-governor
 TEST_QWEN_STATE_TEST := $(ENGINE_TEST_BUILD)/qwen-state-storage
 TEST_STATUS_TEST := $(ENGINE_TEST_BUILD)/runtime-status
 TEST_Q8_CPU_TEST := $(ENGINE_TEST_BUILD)/q8-paged-kv
@@ -158,6 +159,7 @@ TEST_CPU_TARGETS := $(TEST_VISION_PREPARATION) $(TEST_AFFINE_CHECKPOINT) $(TEST_
 	$(TEST_BOOTSTRAP_TEST) \
 	$(TEST_METRICS_TEST) \
 	$(TEST_MEMORY_AUDIT_TEST) \
+	$(TEST_MEMORY_GOVERNOR_TEST) \
 	$(TEST_STATUS_TEST) \
 	$(TEST_Q8_CPU_TEST)
 
@@ -326,6 +328,11 @@ $(TEST_MODEL_PACKAGE_TEST): dev/tests/engine/model_package_test.cpp \
 $(TEST_MEMORY_AUDIT_TEST): runtime/metal/DeviceCapabilities.cpp \
 		runtime/engine/MemoryPlan.cpp runtime/engine/MemoryAudit.cpp \
 		dev/tests/engine/memory_audit_test.cpp | $(ENGINE_TEST_BUILD)
+	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) -o $@
+
+$(TEST_MEMORY_GOVERNOR_TEST): runtime/metal/DeviceCapabilities.cpp \
+		runtime/engine/MemoryPlan.cpp runtime/engine/MemoryGovernor.cpp \
+		dev/tests/engine/memory_governor_test.cpp | $(ENGINE_TEST_BUILD)
 	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) -o $@
 
 $(TEST_QWEN_STATE_TEST): dev/tests/engine/qwen_state_storage_test.mm \
@@ -619,6 +626,7 @@ test-engine-cpu: $(TEST_CPU_TARGETS) $(TEST_ATTENTION_SWEEP) $(TUNE_KERNELS) \
 	$(TEST_BOOTSTRAP_TEST)
 	$(TEST_METRICS_TEST)
 	$(TEST_MEMORY_AUDIT_TEST)
+	$(TEST_MEMORY_GOVERNOR_TEST)
 	$(TEST_STATUS_TEST)
 	$(TEST_Q8_CPU_TEST)
 
