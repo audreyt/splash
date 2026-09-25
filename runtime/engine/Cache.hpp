@@ -95,9 +95,6 @@ public:
   void endRequest(uint64_t requestId);
 
   // Scheduling probe only: does not pin, touch recency, or count a hit.
-  [[nodiscard]] uint32_t
-  cachedTokens(std::span<const uint32_t> prompt,
-               std::span<const ImageSpan> images = {}) const;
   [[nodiscard]] CacheProbe
   probe(std::span<const uint32_t> prompt,
         std::span<const ImageSpan> images = {}) const;
