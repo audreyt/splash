@@ -31,6 +31,20 @@ MODEL_IDS = (
 
 
 class LauncherTests(unittest.TestCase):
+    def setUp(self):
+        # No serve refreshes the catalog from the Hub into the checkout, and
+        # the launcher's defaults ignore the caller's Splash settings.
+        self.refresh = self.enterContext(
+            mock.patch.object(launcher.catalog, "spawn_refresh")
+        )
+        self.enterContext(mock.patch.dict(os.environ))
+        for name in (
+            "SPLASH_PORT",
+            "SPLASH_API_KEY",
+            "SPLASH_DEFAULT_REASONING_EFFORT",
+        ):
+            os.environ.pop(name, None)
+
     def test_kv_format_is_an_explicit_load_option(self):
         base = ["serve", "--model", MODEL_ID]
         self.assertEqual(launcher.parse_args(base).kv_format, "int8")
@@ -134,7 +148,6 @@ class LauncherTests(unittest.TestCase):
                 mock.patch.object(launcher, "RUNTIME_DIR", Path(temporary)),
                 mock.patch.object(launcher.socket, "socket") as factory,
                 mock.patch.object(launcher, "_ensure_installed"),
-                mock.patch.object(launcher.catalog, "spawn_refresh"),
                 mock.patch.object(launcher.os, "execve") as execute,
             ):
                 arguments = [
@@ -203,7 +216,7 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(json.loads(lock_path.read_text()), owner)
 
             def check_exec(binary, argv, environment):
-                refresh.assert_called_once_with()
+                self.refresh.assert_called_once_with()
                 self.assertEqual(binary, str(launcher.paths.PYTHON))
                 self.assertEqual(argv[argv.index("--max-context") + 1], "102400")
                 self.assertEqual(
@@ -238,7 +251,6 @@ class LauncherTests(unittest.TestCase):
             with (
                 mock.patch.object(launcher, "RUNTIME_DIR", runtime),
                 mock.patch.object(launcher.socket, "socket"),
-                mock.patch.object(launcher.catalog, "spawn_refresh") as refresh,
                 mock.patch.object(
                     launcher, "_ensure_installed", side_effect=check_install
                 ) as install,
@@ -513,7 +525,6 @@ class LauncherTests(unittest.TestCase):
             with (
                 mock.patch.object(launcher, "RUNTIME_DIR", runtime),
                 mock.patch.object(launcher, "_ensure_installed") as install,
-                mock.patch.object(launcher.catalog, "spawn_refresh"),
                 mock.patch.object(launcher.os, "execve", side_effect=execute),
                 mock.patch("sys.stderr", io.StringIO()) as error,
             ):
@@ -710,7 +721,6 @@ class LauncherTests(unittest.TestCase):
             with (
                 mock.patch.object(launcher, "RUNTIME_DIR", runtime),
                 mock.patch.object(launcher.socket, "socket"),
-                mock.patch.object(launcher.catalog, "spawn_refresh"),
                 mock.patch.object(launcher, "_ensure_installed") as install,
                 mock.patch.object(
                     launcher.model_artifacts,
@@ -789,7 +799,6 @@ class LauncherTests(unittest.TestCase):
                 mock.patch.object(launcher, "RUNTIME_DIR", runtime),
                 mock.patch.object(launcher.paths, "MODELS", runtime / "models"),
                 mock.patch.object(launcher.socket, "socket"),
-                mock.patch.object(launcher.catalog, "spawn_refresh"),
                 mock.patch.object(launcher, "_ensure_installed"),
                 mock.patch.object(
                     launcher.model_artifacts, "selection_link", return_value=selection
