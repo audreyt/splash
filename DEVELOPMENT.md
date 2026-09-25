@@ -333,10 +333,13 @@ copy of the weights about the model's size, its prepared target, draft and
 vision tensors. Preparing needs that much free disk space plus a 2 GiB reserve:
 before anything is written, the factory (`ModelFactory.cpp`) constructs the
 vision tower's loader (`planVisionLoader`, which the vision encoder test
-shares), the draft's and the target's, and checks the space of every missing
-file they plan, plus the reserve, once. Uninstalling a model does not delete
-possibly shared prepared weights. With Splash stopped, entry directories can be
-deleted; deleting the whole cache causes preparation at the next load.
+shares), the draft's and the target's, and checks once for the space their
+missing files add beyond the entries they supersede (below), plus the largest
+file written while the entry it replaces remains, plus the reserve. After a
+preparation-identity change, preparing thus needs little more than its largest
+file. Uninstalling a model does not delete possibly shared prepared weights.
+With Splash stopped, entry directories can be deleted; deleting the whole cache
+causes preparation at the next load.
 
 A prepared file's key hashes its adapter's preparation identity, its plan, and
 the bytes, type and shape of every source tensor it reads, located and hashed
@@ -394,10 +397,12 @@ and matches the digest its entry records (`requireVerifiedFile`), so a file
 replaced or changed after `prepare` checked it is refused.
 Runtime admission counts prepared weights, draft and vision exactly once
 (`preparedModelWeightBytes`, which `tune-kernels` and the runtime oracle use
-too). File
-backing does not make Metal-resident pages reclaimable: residency wires them
-until released. macOS page cache, driver allocations and other applications
-still affect memory pressure and swap.
+too). Before loading, startup refuses a model whose prepared weights, with the
+pipeline and runtime reserves, one state cell and one KV extent, exceed the
+hard budget, so a model that can never fit is not prepared. File backing does
+not make Metal-resident pages reclaimable: residency wires them until
+released. macOS page cache, driver allocations and other applications still
+affect memory pressure and swap.
 
 `loadQwenTarget` (`QwenTargetLoader.hpp`) reads a target's files
 (`QwenTargetFiles`: packed files, or the files `AffineTargetLoader` or
@@ -658,7 +663,10 @@ path. Constrained requests use a separate batch for the host mask exchange.
 Long prefill uses disposable rolling checkpoints every 4096 tokens. Contended
 prefill adapts toward a 500 ms slice, keeping 2048-token chunks for long unopposed
 work. These policies do not extend client deadlines. Memory recovery waits are
-bounded, but readiness does not guarantee that a request-sized allocation fits.
+bounded: after a suspension, new work waits for resident requests only while
+memory is still short, and at most for the 30 s resource wait; suspended
+requests then resume first, each within its own resource wait. Readiness does
+not guarantee that a request-sized allocation fits.
 
 ### Judgment contracts
 
