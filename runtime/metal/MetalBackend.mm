@@ -18,6 +18,8 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -107,6 +109,8 @@ constexpr uint64_t kPlacementSparsePageBytes = MetalBackend::kPlacementSparsePag
 constexpr MTLSparsePageSize kPlacementSparsePageSize = MTLSparsePageSize64;
 constexpr NSUInteger kSparseUnmapTimeoutMilliseconds = 30000;
 constexpr NSUInteger kSparseMapTimeoutMilliseconds = 30000;
+// Entries of a kernel's buffer argument table on every Apple GPU family.
+constexpr uint32_t kBufferArgumentEntries = 31;
 
 MTLSparsePageSize metalSparsePageSize(uint64_t bytes) {
     if (bytes != kPlacementSparsePageBytes) {
@@ -140,6 +144,14 @@ void raisePeak(std::atomic<T> &peak, T value) noexcept {
            !peak.compare_exchange_weak(current, value,
                                        std::memory_order_relaxed)) {}
 }
+
+// Hashes pipeline names as views, so a cache lookup builds no string.
+struct PipelineNameHash {
+    using is_transparent = void;
+    size_t operator()(std::string_view name) const noexcept {
+        return std::hash<std::string_view>{}(name);
+    }
+};
 
 NSString *checkedNSString(std::string_view value, std::string_view field) {
     NSString *result = [[NSString alloc]
@@ -439,8 +451,11 @@ struct MetalBackend::Impl {
     __strong id<MTL4CommandQueue> sparseQueue = nil;
     __strong id<MTLSharedEvent> sparseEvent = nil;
     __strong id<MTLLibrary> library = nil;
-    __strong NSMutableDictionary<NSString *, id<MTLComputePipelineState>>
-        *pipelines = nil;
+    // Looked up for every dispatch on the encode path, which the GPU waits
+    // for; a hit allocates nothing.
+    std::unordered_map<std::string, id<MTLComputePipelineState>,
+                       PipelineNameHash, std::equal_to<>>
+        pipelines;
 
     DeviceCapabilities capabilities;
     std::shared_ptr<AllocationAccounting> accounting =
@@ -554,10 +569,10 @@ struct MetalBackend::Impl {
         if (name.empty()) {
             throw MetalBackendError("Metal pipeline name must not be empty");
         }
-        NSString *key = checkedNSString(name, "pipeline name");
-        id<MTLComputePipelineState> cached = [pipelines objectForKey:key];
-        if (cached) return cached;
+        if (const auto cached = pipelines.find(name); cached != pipelines.end())
+            return cached->second;
 
+        NSString *key = checkedNSString(name, "pipeline name");
         id<MTLFunction> function = [library newFunctionWithName:key];
         if (!function) {
             throw MetalBackendError(
@@ -571,7 +586,7 @@ struct MetalBackend::Impl {
                 "unable to create Metal pipeline " + std::string(name) +
                 ": " + errorDescription(error));
         }
-        [pipelines setObject:result forKey:key];
+        pipelines.emplace(name, result);
         sampleDeviceMemory();
         return result;
     }
@@ -737,10 +752,6 @@ MetalBackend::MetalBackend(std::string metallibPath, double commandTimeoutSecond
             throw MetalBackendError(
                 "unable to load metallib " + metallibPath + ": " +
                 errorDescription(error));
-        }
-        impl_->pipelines = [NSMutableDictionary dictionary];
-        if (!impl_->pipelines) {
-            throw MetalBackendError("unable to create Metal pipeline cache");
         }
         impl_->sampleDeviceMemory();
 
@@ -1315,7 +1326,18 @@ CommandTicket MetalBackend::submitCommandAsync(
             dispatch.threadsPerThreadgroup.y *
             dispatch.threadsPerThreadgroup.z;
 
-        std::unordered_set<uint32_t> indices;
+        // Each binding takes its own entry of the argument table.
+        uint32_t indices = 0;
+        const auto claim = [&](uint32_t index) {
+            if (index >= kBufferArgumentEntries) {
+                throw MetalBackendError(
+                    "compute binding index exceeds the argument table");
+            }
+            if (indices & (uint32_t{1} << index)) {
+                throw MetalBackendError("duplicate compute binding index");
+            }
+            indices |= uint32_t{1} << index;
+        };
         for (const BufferBinding &binding : dispatch.buffers) {
             if (!binding.buffer.impl_ || !binding.buffer.impl_->allocation) {
                 std::ostringstream message;
@@ -1329,18 +1351,14 @@ CommandTicket MetalBackend::submitCommandAsync(
                 throw MetalBackendError(
                     "compute dispatch buffer belongs to another backend");
             }
-            if (!indices.insert(binding.index).second) {
-                throw MetalBackendError("duplicate compute binding index");
-            }
+            claim(binding.index);
         }
         for (const BytesBinding &binding : dispatch.bytes) {
             if (!binding.data || !binding.sizeBytes) {
                 throw MetalBackendError("compute byte binding is empty");
             }
             checkedNSUInteger(binding.sizeBytes, "byte binding size");
-            if (!indices.insert(binding.index).second) {
-                throw MetalBackendError("duplicate compute binding index");
-            }
+            claim(binding.index);
         }
         prepared.push_back(item);
     }
@@ -1540,7 +1558,7 @@ uint64_t MetalBackend::submissionCount() const noexcept {
 
 size_t MetalBackend::pipelineCount() const noexcept {
     std::lock_guard lock(impl_->commandMutex);
-    return impl_->pipelines.count;
+    return impl_->pipelines.size();
 }
 
 void MetalBackend::checkHealth() {

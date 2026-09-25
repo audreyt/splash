@@ -1126,6 +1126,20 @@ void run(const std::string &metallibPath) {
     requireBackendError(
         [&] { (void)backend.submit(missingPipeline); },
         "missing pipeline was accepted");
+    {
+        // A binding takes one of the argument table's 31 entries of its own.
+        ComputeDispatch rebound;
+        rebound.pipelineName = "test_add_u32";
+        rebound.buffers = {{0, view}};
+        rebound.bytes = {{0, &kIncrement, sizeof(kIncrement)}};
+        requireBackendError(
+            [&] { (void)backend.submit(rebound); },
+            "a binding index bound twice was accepted");
+        rebound.bytes = {{31, &kIncrement, sizeof(kIncrement)}};
+        requireBackendError(
+            [&] { (void)backend.submit(rebound); },
+            "a binding index past the argument table was accepted");
+    }
     require(backend.healthy(),
             "a descriptor error incorrectly poisoned the backend");
     require(backend.unhealthyReason().empty(),
