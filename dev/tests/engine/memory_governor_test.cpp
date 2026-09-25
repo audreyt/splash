@@ -204,12 +204,50 @@ void testAdvertisedContextIsGrantable() {
   }
 }
 
+// A request can need more than the host headroom above the warning margin
+// while the idle headroom still clears it. Its refusal must start the paced
+// reclaim it waits for, after which it fits.
+void testHostRefusalStartsReclaim() {
+  metal::statistics = {};
+  metal::statistics.allocatedBytes = 20 * kGiB;
+  metal::statistics.deviceCurrentAllocatedBytes = 20 * kGiB;
+  metal::MetalBackend backend("unused");
+  const uint64_t hostReserve = 2 * kGiB;
+  const uint64_t stateCell = 350'224'384;
+  std::optional<uint64_t> available = hostReserve + kGiB + 200 * kMiB;
+  MemoryGovernor governor(backend, 40 * kGiB, hostReserve,
+                          [&available] { return available; });
+  metal::AllocationFailure failure;
+  require(!governor.tryReserve(40 * kGiB, &failure) &&
+              failure == metal::AllocationFailure::EngineBudget &&
+              governor.snapshot().pressure == MemoryPressure::Normal,
+          "an engine budget refusal was taken for host pressure");
+  require(!governor.tryReserve(stateCell, &failure) &&
+              failure == metal::AllocationFailure::HostPressure,
+          "a request beyond the host headroom was admitted");
+  const MemoryGovernorSnapshot refused = governor.snapshot();
+  MemoryPressurePolicy policy;
+  const MemoryReclaimDirective directive = policy.update(refused, 0.0, true);
+  require(refused.pressure == MemoryPressure::Warning &&
+              !refused.hostGrowthAllowed && directive.reclaimEmptyKvExtents &&
+              !directive.evictAllUnpinnedPrefixes &&
+              !directive.keepResumePoint &&
+              directive.targetBytes == kGiB - 200 * kMiB,
+          "a request-sized host refusal did not start the paced reclaim");
+  // The reclaim reaches the recovery margin, and the request fits.
+  *available += directive.targetBytes;
+  require(governor.tryReserve(stateCell).has_value() &&
+              governor.snapshot().pressure == MemoryPressure::Normal,
+          "the waiting request did not fit after the reclaim");
+}
+
 } // namespace
 
 int main() {
   try {
     testHostAvailabilityCountsReclaimablePages();
     testAdvertisedContextIsGrantable();
+    testHostRefusalStartsReclaim();
     std::cout << "memory governor tests passed\n";
     return EXIT_SUCCESS;
   } catch (const std::exception &error) {

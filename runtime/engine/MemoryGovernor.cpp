@@ -193,6 +193,11 @@ MemoryGovernor::tryReserve(uint64_t bytes, metal::AllocationFailure *failure) {
                     requested <= limitBytes_ - observed;
   bool hostFits =
       hostHeadroomBytes(hostAvailable, requested) >= kHostWarningMarginBytes;
+  // A request that only the host headroom refuses waits for host memory
+  // while the idle headroom may still clear the margin. Hold host pressure
+  // so the paced reclaim frees toward the recovery margin for it.
+  if (engineFits && !hostFits)
+    hostConstrained_ = true;
   if (!engineFits || !hostFits || hostConstrained_ ||
       pressure == MemoryPressure::Critical) {
     if (failure)

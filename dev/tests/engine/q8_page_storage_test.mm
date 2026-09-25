@@ -71,14 +71,15 @@ void run(const std::string &metallib) {
             "admission swallowed a backend defect or leaked its reservation");
     require(admit(1024, [] {}) && bounded.snapshot().reservedBytes == 0,
             "driver allocation denial poisoned later admission");
-    // A request may cross the reserve while the idle pressure snapshot is
-    // still Normal. Its exact refusal reason must remain retryable.
+    // A request may cross the warning margin while the idle headroom still
+    // clears it. Its exact refusal reason must remain retryable, and the
+    // refusal holds host pressure so that paced reclaim starts.
     fakeHostAvailable = hostReserve + giB + 512;
     bool allocated = false;
     const auto hostDenied = admit(1024, [&] { allocated = true; });
     require(!hostDenied && !allocated &&
                 hostDenied.failure == metal::AllocationFailure::HostPressure &&
-                bounded.snapshot().pressure == MemoryPressure::Normal &&
+                bounded.snapshot().pressure == MemoryPressure::Warning &&
                 bounded.snapshot().reservedBytes == 0,
             "request-sized host refusal lost its cause or ran allocation");
     fakeHostAvailable = hostReserve + 3 * giB;
