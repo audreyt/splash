@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -350,10 +351,14 @@ def _write_hermes_profile(home, server):
 
 def _pi(path, server, environment, arguments):
     # Pi reads custom providers only from models.json in its agent directory,
-    # beside the user's sessions, settings and extensions. Replace the Splash
-    # provider there and leave everything else as it is.
-    _write_pi_provider(_pi_models_path(environment), server, environment)
-    return [path, "--provider", "splash", "--model", server.model, *arguments]
+    # beside the user's sessions, settings and extensions. Replace this
+    # server's provider there and leave everything else as it is: splash for
+    # the default port, 8000, and splash-<port> for another, so a Pi session
+    # keeps the server it was started for.
+    port = urllib.parse.urlsplit(server.base_url).port
+    provider = "splash" if port == 8000 else f"splash-{port}"
+    _write_pi_provider(_pi_models_path(environment), provider, server, environment)
+    return [path, "--provider", provider, "--model", server.model, *arguments]
 
 
 def _pi_models_path(environment):
@@ -362,7 +367,7 @@ def _pi_models_path(environment):
     return directory / "models.json"
 
 
-def _write_pi_provider(path, server, environment):
+def _write_pi_provider(path, provider, server, environment):
     # Write through a symlinked models.json, as dotfile managers link it.
     path = path.resolve()
     invalid = f"Invalid Pi models.json: {path}"
@@ -391,7 +396,7 @@ def _write_pi_provider(path, server, environment):
     }
     config["providers"] = {
         **providers,
-        "splash": {
+        provider: {
             "baseUrl": server.endpoint,
             "api": "openai-completions",
             "apiKey": api_key,

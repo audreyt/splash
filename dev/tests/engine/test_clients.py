@@ -352,6 +352,28 @@ class ClientTests(unittest.TestCase):
         self.assertEqual([path.name for path in agent.iterdir()], ["models.json"])
         self.assertEqual(list(self.runtime.iterdir()), [])
 
+    def test_pi_names_a_provider_per_port(self):
+        self.command("pi")
+        argv, _ = clients.command(
+            "pi",
+            "/bin/pi",
+            "http://127.0.0.1:8001/",
+            MODEL,
+            102400,
+            self.runtime,
+            {},
+            input_modalities=["text"],
+        )
+        self.assertEqual(argv[:3], ["/bin/pi", "--provider", "splash-8001"])
+        providers = json.loads(self.pi_models.read_text())["providers"]
+        self.assertEqual(
+            {name: provider["baseUrl"] for name, provider in providers.items()},
+            {
+                "splash": "http://127.0.0.1:8000/v1",
+                "splash-8001": "http://127.0.0.1:8001/v1",
+            },
+        )
+
     def test_pi_models_follow_the_agent_directory_setting(self):
         self.command("pi", env={"PI_CODING_AGENT_DIR": "~/custom agent"})
         path = self.home / "custom agent/models.json"

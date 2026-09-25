@@ -36,8 +36,9 @@ in your browser, or run an installed coding agent from another terminal:
 splash opencode    # or: splash claude / splash codex / splash hermes / splash pi
 ```
 
-`splash pi` adds a `splash` provider to Pi's `models.json` and leaves Pi's
-other providers, settings and sessions alone.
+`splash pi` adds a `splash` provider to Pi's `models.json` (`splash-<port>` for
+a server on another port) and leaves Pi's other providers, settings and
+sessions alone.
 
 Press Ctrl+C in the server terminal to stop Splash.
 
