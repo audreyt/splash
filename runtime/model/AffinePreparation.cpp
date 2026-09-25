@@ -123,19 +123,19 @@ void writeDecay(int destination, const Section &section) {
 // every tensor read. config.json is only validated against the layout, whose
 // dimensions and quantization the plan records; nothing else in it changes
 // these bytes.
-PreparedWeight affineImageWeight(const Image &image, const std::string &source) {
+PreparedWeight affineImageWeight(const Image &image, std::string_view directory, const std::string &source) {
   WeightIdentity identity("splash-affine-preparation-v2 " SPLASH_AFFINE_PREPARATION_ID);
   identity.record("image", image.magic, image.layer, image.type, image.bytes);
   for (const Section &section : image.sections) {
     identity.record("section", int(section.kind), section.offset, section.bytes, section.rows, section.columns,
                     section.experts, section.bits);
-    if (section.kind != SectionKind::Projection) section.input.tensor->identify(identity);
+    if (section.parts.empty()) section.input.tensor->identify(identity);
     for (const ProjectionPart &part : section.parts) {
       identity.record("part", part.rows);
       for (const Input &field : part.fields) field.tensor->identify(identity);
     }
   }
-  return identity.weight(image.bytes, "target/" + image.name, source);
+  return identity.weight(image.bytes, std::string(directory) + "/" + image.name, source);
 }
 
 void writeAffineImage(int destination, const Image &image, const PreparationCheck &admit) {

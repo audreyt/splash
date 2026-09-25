@@ -8,8 +8,8 @@
 
 #include "model/PreparedWeights.hpp"
 
-#include <array>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace splash::model::affine {
@@ -29,7 +29,7 @@ struct Input {
 // Source rows of a fused projection: weight, scales and biases.
 struct ProjectionPart {
   uint32_t rows = 0;
-  std::array<Input, 3> fields{};
+  std::vector<Input> fields;
 };
 
 struct Section {
@@ -50,8 +50,10 @@ struct Image {
   std::vector<std::pair<std::string, uint32_t>> quantized;
 };
 
-// The identity of an image planned from a checkpoint at `source`.
-[[nodiscard]] PreparedWeight affineImageWeight(const Image &image, const std::string &source);
+// The identity of an image planned from a checkpoint at `source`, the
+// component directory/name.
+[[nodiscard]] PreparedWeight affineImageWeight(const Image &image, std::string_view directory,
+                                               const std::string &source);
 
 // Writes an image into its preallocated, zeroed destination within the
 // preparation staging bound; admit runs before each chunk.
