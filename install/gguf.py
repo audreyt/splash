@@ -34,10 +34,14 @@ DERIVED_FILES = (
 
 
 class Metadata:
-    """Bounded little-endian GGUF v2/v3 metadata reader."""
+    """Bounded little-endian GGUF v3 metadata reader."""
 
-    VERSIONS = (2, 3)
+    # The version, and the bound on each of the tensor and key counts, that
+    # the native reader (runtime/model/GgufFile.cpp) accepts.
+    VERSION = 3
+    MAX_FIELDS = 16384
     MAX_BYTES = 128 * 1024 * 1024
+    # The bound on one array's elements: a vocabulary or its merges.
     MAX_ITEMS = 1_000_000
     # GGML_MAX_DIMS, the highest tensor rank the native reader
     # (runtime/model/GgufFile.cpp) accepts.
@@ -72,13 +76,11 @@ class Metadata:
             if isinstance(source, (str, Path))
             else contextlib.nullcontext(source)
         ) as self.stream:
-            if self.read(4) != b"GGUF" or self.scalar("I") not in self.VERSIONS:
-                raise ModelError(
-                    "unsupported GGUF header (expected little-endian v2/v3)"
-                )
+            if self.read(4) != b"GGUF" or self.scalar("I") != self.VERSION:
+                raise ModelError("unsupported GGUF header (expected little-endian v3)")
             tensor_count = self.scalar("Q")
             key_count = self.scalar("Q")
-            if key_count > self.MAX_ITEMS or tensor_count > self.MAX_ITEMS:
+            if key_count > self.MAX_FIELDS or tensor_count > self.MAX_FIELDS:
                 raise ModelError("GGUF metadata has too many fields")
             for _ in range(key_count):
                 key = self.string()

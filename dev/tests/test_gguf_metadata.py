@@ -135,9 +135,14 @@ class GgufMetadataTests(unittest.TestCase):
         with mock.patch.object(gguf.Metadata, "MAX_BYTES", 24):
             with self.assertRaisesRegex(models.ModelError, "size limit"):
                 gguf.Metadata(path)
-        path.write_bytes(raw[:4] + struct.pack(">I", 3) + raw[8:])
-        with self.assertRaisesRegex(models.ModelError, "unsupported GGUF header"):
-            gguf.Metadata(path)
+        # Version 3, little-endian, as the native reader requires.
+        for version in (struct.pack(">I", 3), struct.pack("<I", 2)):
+            path.write_bytes(raw[:4] + version + raw[8:])
+            with (
+                self.subTest(version=version),
+                self.assertRaisesRegex(models.ModelError, "unsupported GGUF header"),
+            ):
+                gguf.Metadata(path)
 
     def test_reader_rejects_duplicate_keys_unknown_types_and_nested_arrays(self):
         path = write_gguf(self.root / "bad.gguf", {"key": "value"})
@@ -174,14 +179,18 @@ class GgufMetadataTests(unittest.TestCase):
 
     def test_reader_checks_counts_tensor_ranks_and_duplicate_tensors(self):
         path = self.root / "tensors.gguf"
-        with mock.patch.object(gguf.Metadata, "MAX_ITEMS", 0):
-            for values, tensors in (({"key": "value"}, []), ({}, [("t", GGML["F32"])])):
-                write_gguf(path, values, tensors)
-                with (
-                    self.subTest(keys=len(values), tensors=len(tensors)),
-                    self.assertRaisesRegex(models.ModelError, "too many fields"),
-                ):
-                    gguf.Metadata(path)
+        # The native reader's bound on each of the tensor and key counts.
+        header = struct.pack("<4sI", b"GGUF", 3)
+        for tensors, keys in ((16385, 0), (0, 16385)):
+            path.write_bytes(header + struct.pack("<QQ", tensors, keys))
+            with (
+                self.subTest(tensors=tensors, keys=keys),
+                self.assertRaisesRegex(models.ModelError, "too many fields"),
+            ):
+                gguf.Metadata(path, tensors=True)
+        path.write_bytes(header + struct.pack("<QQ", 16384, 16384))
+        with self.assertRaisesRegex(models.ModelError, "truncated"):
+            gguf.Metadata(path, tensors=True)
         # Ranks up to the native reader's limit, GGML_MAX_DIMS.
         for rank in (1, 4):
             fixture_files.write_gguf(path, {}, [("t", [2] * rank, GGML["F32"], b"")])
