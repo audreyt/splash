@@ -456,9 +456,7 @@ struct Runtime::Impl {
         image.data = std::make_shared<ImageData>();
         image.data->embeddings = cachedEmbeddings(span);
         image.data->encoded = static_cast<bool>(image.data->embeddings);
-        if (image.data->encoded)
-          ++counters.imageEmbeddingReuses;
-        else
+        if (!image.data->encoded)
           bytes += span.pixelBytes() + embeddingBytes(span);
       }
       staged.push_back(std::move(image));
@@ -499,6 +497,24 @@ struct Runtime::Impl {
     }
     stagedImages.emplace(request.id, std::move(staged));
     return true;
+  }
+
+  // Hands an admitted request its staged images. Only then do its embedding
+  // cache hits count as reuses; the engine retries denied admissions.
+  void takeStagedImages(Request &entry) {
+    const auto staged = stagedImages.find(entry.id);
+    if (staged == stagedImages.end())
+      return;
+    entry.images = std::move(staged->second);
+    stagedImages.erase(staged);
+    for (auto image = entry.images.begin(); image != entry.images.end();
+         ++image) {
+      const bool repeated = std::any_of(
+          entry.images.begin(), image,
+          [&](const ImageState &first) { return first.data == image->data; });
+      if (image->data->encoded && !repeated)
+        ++counters.imageEmbeddingReuses;
+    }
   }
 
   [[nodiscard]] bool visionIdle() const noexcept {
@@ -1802,11 +1818,7 @@ StateAdmission Runtime::resume(const ModelRequest &request) {
     entry.slot = *admission.cell;
     entry.resident = true;
     entry.promptTokens = static_cast<uint32_t>(request.prompt.size());
-    if (auto staged = impl_->stagedImages.find(request.id);
-        staged != impl_->stagedImages.end()) {
-      entry.images = std::move(staged->second);
-      impl_->stagedImages.erase(staged);
-    }
+    impl_->takeStagedImages(entry);
   }
   images.committed = admission.granted();
   return admission;
@@ -1869,11 +1881,7 @@ metal::AllocationResult Runtime::beginAt(const ModelRequest &request, uint32_t s
     return admission;
   entry.slot = stateSlot;
   entry.resident = true;
-  if (auto staged = impl_->stagedImages.find(request.id);
-      staged != impl_->stagedImages.end()) {
-    entry.images = std::move(staged->second);
-    impl_->stagedImages.erase(staged);
-  }
+  impl_->takeStagedImages(entry);
   try {
     auto [_, inserted] = impl_->requests.emplace(request.id, std::move(entry));
     if (!inserted) {

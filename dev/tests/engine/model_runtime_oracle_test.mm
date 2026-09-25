@@ -553,11 +553,13 @@ void requireImageRowsAfterReclaim(model::Runtime &executor,
   // A mixed hit/miss must keep the cached rows while admitting new resources.
   // Fail at the encoder, image buffers and first state cell, including an
   // exception after allocation, and leave both the cache and live request intact.
+  // Only the admitted attempt counts its cache hit as a reuse.
   EngineRequest mixed = request;
   mixed.id = 97;
   mixed.images.push_back({80, 16, 8, 8, 157, 439});
   mixed.imagePixels.resize(2 * request.imagePixels.size());
   const uint64_t beforeMixed = backend.memoryStats().allocatedBytes;
+  const uint64_t reusedBeforeMixed = executor.telemetry().imageEmbeddingReuses;
   for (int boundary : {0, 1, 2}) {
     for (bool throwing : {false, true}) {
       fault = {boundary, throwing};
@@ -577,7 +579,6 @@ void requireImageRowsAfterReclaim(model::Runtime &executor,
               "mixed image admission changed preexisting buffers on failure");
     }
   }
-  const uint64_t reusedBeforeMixed = executor.telemetry().imageEmbeddingReuses;
   const ImageSpan &miss = mixed.images.back();
   const uint64_t missingImageBytes = miss.pixelBytes() +
       uint64_t{ops::Vision::embeddingRows({miss.gridHeight, miss.gridWidth})} *
