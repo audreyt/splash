@@ -543,9 +543,8 @@ def _parameter_rules(rule, prefix, value_schema):
     else:
         choices = []
         for choice_index, value in enumerate(string_schema[1]):
-            text = "null" if value is None else value
-            if text:
-                choices.append(json.dumps(text))
+            if value:
+                choices.append(json.dumps(value))
             else:
                 empty_rule = f"{rule}_empty_{choice_index}"
                 rules.append(f"{empty_rule}:")

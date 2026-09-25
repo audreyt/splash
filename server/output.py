@@ -440,8 +440,6 @@ def _typed_tool_value(value, schema, root):
         return parsed
     if string_schema[0] == "raw" or value in string_schema[1]:
         return value
-    if value == "null" and None in string_schema[1]:
-        return None
     return parsed
 
 
