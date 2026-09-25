@@ -5,6 +5,7 @@
 #include "metal/abi/PagedAttention.h"
 #include "ops/PagedKv.hpp"
 #include "ops/Linear.hpp"
+#include "ops/Normalization.hpp"
 
 #include <algorithm>
 #include <array>
@@ -289,7 +290,7 @@ public:
 
   static void
   addPrefillProjection(metal::CommandGraph &graph, metal::MetalBuffer packed,
-                       metal::MetalBuffer queryNorm, metal::MetalBuffer keyNorm,
+                       const NormWeights &queryNorm, const NormWeights &keyNorm,
                        metal::MetalBuffer ropeCos, metal::MetalBuffer ropeSin,
                        metal::MetalBuffer queries, metal::MetalBuffer chunkKeys,
                        metal::MetalBuffer chunkValues, uint32_t tokens,
@@ -303,20 +304,22 @@ public:
                              uint32_t queryHeads, kv::Layout layout);
   static void
   addVerifyProjection(metal::CommandGraph &graph, metal::MetalBuffer packed,
-                      metal::MetalBuffer queryNorm, metal::MetalBuffer keyNorm,
+                      const NormWeights &queryNorm, const NormWeights &keyNorm,
                       metal::MetalBuffer ropeCos, metal::MetalBuffer ropeSin,
                       metal::MetalBuffer queries, metal::MetalBuffer chunkKeys,
                       metal::MetalBuffer chunkValues, uint32_t rowsPerLane,
                       uint32_t cacheStride, uint32_t rowStride,
                       uint32_t queryHeads, kv::Layout layout,
                       uint32_t lanes);
-  static void addVerifyGate(metal::CommandGraph &graph,
-                            metal::MetalBuffer packed,
-                            metal::MetalBuffer attention,
-                            metal::MetalBuffer hidden, uint32_t rowsPerLane,
-                            uint32_t cacheStride, uint32_t rowStride,
-                            uint32_t queryHeads, kv::Layout layout,
-                            uint32_t lanes, LinearScratch scratch = {});
+  // Also writes the out-projection's `input` table when it needs one.
+  static PreparedInput addVerifyGate(metal::CommandGraph &graph,
+                                     metal::MetalBuffer packed,
+                                     metal::MetalBuffer attention,
+                                     metal::MetalBuffer hidden, uint32_t rowsPerLane,
+                                     uint32_t cacheStride, uint32_t rowStride,
+                                     uint32_t queryHeads, kv::Layout layout,
+                                     uint32_t lanes, LinearScratch scratch = {},
+                                     LinearInput input = LinearInput::Plain);
 
   [[nodiscard]] static kv::Q8ChunkedPrefillParams
   prefillParams(uint64_t logicalPosition, uint32_t chunkTokens,

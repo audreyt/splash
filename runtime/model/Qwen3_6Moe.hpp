@@ -5,6 +5,7 @@
 #include "WeightStore.hpp"
 #include "ops/Linear.hpp"
 #include "ops/MoE.hpp"
+#include "ops/Normalization.hpp"
 #include "ops/PagedAttention.hpp"
 
 #include <array>
@@ -76,18 +77,18 @@ struct Qwen3_6MoeLayout final {
 };
 
 struct Qwen3_6MoeLayerWeights final {
-  metal::MetalBuffer inputNorm;
+  ops::NormWeights inputNorm;
   QwenMixerWeights mixer;
-  metal::MetalBuffer postAttentionNorm;
+  ops::NormWeights postAttentionNorm;
   ops::MoeWeights ffn;
 };
 
 struct Qwen3_6MoeWeights final {
   Qwen3_6MoeLayout layout;
   std::vector<Qwen3_6MoeLayerWeights> layers;
-  metal::MetalBuffer finalNorm;
-  ops::Q4Projection logitsProjection;
-  ops::Q4Projection tokenEmbedding;
+  ops::NormWeights finalNorm;
+  ops::Projection logitsProjection;
+  ops::EmbeddingWeights tokenEmbedding;
   std::vector<WeightFileRecord> files;
   uint64_t actualAllocatedBytes = 0;
   std::string manifestFingerprintSha256;

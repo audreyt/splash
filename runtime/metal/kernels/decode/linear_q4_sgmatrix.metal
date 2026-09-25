@@ -1,4 +1,10 @@
+// Keep the source order of float operations, which Metal's default fast math
+// lets the compiler reassociate, so the epilogue order below is fixed. Set
+// before the includes, so it also holds for their code compiled here.
+#pragma clang fp reassociate(off)
 #include "metal/kernels/common/q4_sgmatrix.h"
+#include "metal/kernels/common/sgmatrix.h"
+#include "metal/kernels/common/split_reduce.h"
 
 // Packed Q4 stays in its shipped StorageN=256 layout. Each simdgroup computes
 // W X^T for 16 columns (8 for the two gate/up streams). The bfloat operand
@@ -11,7 +17,7 @@ template <Epilogue E>
 __attribute__((always_inline)) inline void decode(device const bfloat *table, device const uchar *w0,
                    device const bfloat *sc0, device const bfloat *bi0,
                    device bfloat *out, device const float *sums,
-                   device float *partials, device atomic_uint *counters,
+                   device coherent(device) float *partials, device atomic_uint *counters,
                    device const bfloat *residual, device const uchar *w1,
                    device const bfloat *sc1, device const bfloat *bi1,
                    constant Q4Params &p, uint3 tg, uint tid, uint sg, uint lane,
@@ -32,7 +38,7 @@ __attribute__((always_inline)) inline void decode(device const bfloat *table, de
   }
   const uint first = tg.y * (groups / splits);
   const uint end = tg.y + 1 == splits ? groups : first + groups / splits;
-  const Lane l = lane_map(lane);
+  const sgmatrix::Lane l = sgmatrix::lane_map(lane);
   const uint fm = l.fm, fn = l.fn, c = fn / 2;
   const uint base = tg.x * tileN + sg * (gateUp ? 8 : 16);
   const uint tile = base / 256;
@@ -64,7 +70,7 @@ __attribute__((always_inline)) inline void decode(device const bfloat *table, de
         const uint word = j < 4 ? words[nf].x : words[nf].y;
         const uint pair = ((word >> (4 * (j & 3))) & 0x000F000Fu) | 0x43004300u;
         if (j < 2) dot[nf][j & 1] = float2(0);
-        mma_acc<bfloat>(dot[nf][j & 1], as_type<bfloat2>(pair), b);
+        sgmatrix::mma_acc<bfloat>(dot[nf][j & 1], as_type<bfloat2>(pair), b);
       }
     }
     const ulong prm0 = (ulong(tile) * groups + g) * 256 + col0;
@@ -85,34 +91,20 @@ __attribute__((always_inline)) inline void decode(device const bfloat *table, de
 #pragma unroll
     for (uint nf = 0; nf < 2; ++nf) {
       const uint n = base + fm + (gateUp ? 0 : nf * 8);
-      device float *slot = partials + ulong(tg.y * 2 + nf) * 8 * N + n;
+      const auto slot = partials + ulong(tg.y * 2 + nf) * 8 * N + n;
       slot[fn * N] = acc[nf].x;
       slot[(fn + 1) * N] = acc[nf].y;
     }
-    // Every writer publishes its partials before lane zero signals arrival.
-    // Device-scope fences pair through the atomic counter. The last group
-    // reduces in split order, independent of scheduling. No group spins.
-    threadgroup_barrier(mem_flags::mem_device);
-    if (tid == 0) {
-      atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst,
-                          thread_scope::thread_scope_device);
-      *arrival = atomic_fetch_add_explicit(counters + tg.x, 1u, memory_order_relaxed);
-      atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst,
-                          thread_scope::thread_scope_device);
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
-    if (*arrival != splits - 1) return;
-    float2 total[2] = {float2(0), float2(0)};
-    for (uint s = 0; s < splits; ++s) {
+    if (!split_arrive_last(counters + tg.x, splits, tid, arrival)) return;
 #pragma unroll
-      for (uint nf = 0; nf < 2; ++nf) {
-        const uint n = base + fm + (gateUp ? 0 : nf * 8);
-        device const float *slot = partials + ulong(s * 2 + nf) * 8 * N + n;
-        total[nf] += s == tg.y ? acc[nf] : float2(slot[fn * N], slot[(fn + 1) * N]);
-      }
+    for (uint nf = 0; nf < 2; ++nf) {
+      const uint n = base + fm + (gateUp ? 0 : nf * 8);
+      acc[nf] = split_sum(acc[nf], tg.y, splits, [&](uint s) {
+        const auto slot = partials + ulong(s * 2 + nf) * 8 * N + n;
+        return float2(slot[fn * N], slot[(fn + 1) * N]);
+      });
     }
-    acc[0] = total[0]; acc[1] = total[1];
-    if (tid == 0) atomic_store_explicit(counters + tg.x, 0u, memory_order_relaxed);
+    split_release(counters + tg.x, tid);
   }
   if (gateUp) {
     const uint n = base + fm;
@@ -151,7 +143,7 @@ kernel void decode_linear_q4_prepare(
     device const bfloat *table [[buffer(0)]], device const uchar *weights [[buffer(1)]], \
     device const bfloat *scales [[buffer(2)]], device const bfloat *biases [[buffer(3)]], \
     device bfloat *output [[buffer(4)]], device const float *sums [[buffer(5)]], \
-    device float *partials [[buffer(6)]], device atomic_uint *counters [[buffer(7)]]
+    device coherent(device) float *partials [[buffer(6)]], device atomic_uint *counters [[buffer(7)]]
 #define Q4_SG_THREADS \
     uint3 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]], \
     uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]

@@ -125,6 +125,70 @@ fine-tunes may use any nonempty manifest model name. Native loading validates
 geometry, tensor sizes, binary headers, tokenizer and target/draft compatibility.
 New architectures require engine support; ordinary HF weights need conversion.
 
+## GGUF kernels
+
+Operator plans use each projection's physical layout, `Affine64` or `Block32`.
+`Projection`, `MoeWeights` and `EmbeddingWeights` (`runtime/ops/Weights.hpp`,
+`MoE.hpp`) hold either layout and represent different operator contracts.
+
+The F32 norm multipliers, GDN decay, the MoE router and shared-expert scalar
+gate, and GDN alpha/beta when stored as F32 run in fp32, as llama.cpp keeps
+them (Apple10 prefill chunks multiply the router and alpha/beta on the neural
+accelerator as three bf16 parts per weight that sum to it exactly, so only
+fp32 accumulation rounds).
+
+Decode runs one of two kernel families, chosen by GPU family in `runtime/ops/LinearGguf.cpp`. On
+Apple9 (M3, M4) the register tile (`LinearTile::GgufRegister`) runs the kernels of
+`runtime/metal/kernels/decode/linear_gguf_sgmatrix.metal`, which feed the codes themselves to
+bf16 matrix operations with one fp32 epilogue per coefficient group, so every output is the bf16
+rounding of its fp32-accumulated sum. They read their activations as the Table16 table
+(`kernels/common/gguf_sgmatrix.h`) that the input's producer writes, or
+`decode_linear_gguf_prepare` when none did. On Apple10 (M5) the staged tile
+(`LinearTile::GgufStaged`) runs the kernels of `runtime/metal/kernels/shared/gguf_linear.metal`,
+which dequantize each weight once to half in threadgroup memory (`kernels/common/gguf_staged.h`)
+for MPP `matmul2d`, the neural accelerator's path, on bf16 activations; a step of three request
+lanes runs the 32-row tile over four lanes of storage. Prefill runs the staged kernels on both
+families, chunks of up to 32 rows on the decode tiles. Every projection splits its K across
+threadgroups by one rule (`decodeSplits`: each tile's tiers of threadgroups per core and inputs
+per partition, from measured occupancy) that does not depend on the batch width. The MoE experts
+(`runtime/ops/MoE.cpp`) run the same numerics per family over the grouped rows: the register form
+in `linear_gguf_sgmatrix.metal`, the staged one in `kernels/shared/moe_gguf.metal`. The float
+router and alpha/beta projections run in `kernels/shared/gguf_float.metal`, and the token rows are
+gathered by one template in `kernels/shared/embedding.metal`. These plans are fixed rules of GPU
+family, core count and shape: `Linear::setChoices` and `ExecutionPlans::install` reject tuned
+entries for block projections and GGUF MoE blocks.
+
+A GGUF kernel of one quantized tensor names its epilogue last: `a` none, `r` residual, `g` the
+up pass with the silu gate. The staged ones are `gguf_decode_<format>_m<rows>_<e>` and
+`gguf_prefill_<format>_<e>`, the register ones `gguf_decode_sg_<format>_l<lanes>_<e>`, and the
+experts `moe_expert_gguf_m<rows>_<e>` and `moe_expert_gguf_sg_<e>`; the fused projections run
+`gguf_decode_fused_m<rows>` and `gguf_decode_sg_fused_l<lanes>`. The norm, GDN and
+attention-gate variants that also write a register kernel's input table carry `table64` (the
+affine Q4 kernel's) or `table16` (the GGUF one's) in their names. The epilogue kinds and SiLU of
+both GGUF families are in `kernels/common/gguf_tile.h`, and the MMA helpers every register
+kernel uses, affine, GGUF or fp32, in `kernels/common/sgmatrix.h`.
+
+The ABIs are in `runtime/metal/abi/Gguf.h`, which also defines the tile geometry the kernels
+and `LinearGguf.cpp` share, and `MoE.h`; the image formats in
+`runtime/metal/abi/QuantFormat.h`, their decoding in `runtime/metal/kernels/common/quant_formats.h`
+and the decode-only value tables in `runtime/metal/abi/QuantTables.h`.
+
+The tests' CPU reference is `dev/tests/engine/GgufFormatReference.hpp`. `make test-engine-metal` runs
+`gguf-dequant`, the staged tile's dequantizer, built with the production Metal flags, against
+the half rounding of every reference weight; `gguf-projection`, every GGUF projection through
+`ops::Linear` with each tile forced, so both decode tiles run on every GPU, at one to four
+lanes, every K split and epilogue, fused segments, every gate/up format pair and the prefill
+tiles, each output inside the fp64 bound of `GgufFormatReference.hpp`; and `gguf-moe`: the float
+projections on both float tiles and the MoE layer on every GGUF plan, the staged 8- and 32-row
+tiles and the Apple9 register tile whatever GPU runs it, in every format, against fp64.
+
+Two benchmark tools repeat the measurements behind the GGUF split tiers and MoE plans, with the
+weights DRAM-cold. `make benchmark-gguf-projection GGUF_PROJECTION_ARGS='q4k 5120 8192'` times one
+projection (up to three fused formats and widths, then `K` and an optional epilogue) on both
+decode tiles at one to four lanes and every K split, and marks the device policy's pick;
+`make benchmark-gguf-moe` times one MoE layer at the 35B shape, GGUF against affine Q4, on the
+device's plans and the other GGUF tile.
+
 ## Code and API boundaries
 
 - `server/`: OpenAI Chat/Responses, Anthropic Messages/count_tokens, typed
@@ -355,10 +419,11 @@ make check
 make install test-real test-http-real MODEL=incoai/Qwen3.8-27B-Splash
 ```
 
-`make check-native-cpu` builds production and runs native CPU tests without a
-GPU. `make check-native-metal` requires a supported Metal device; `make check`
-includes both. Hosted CI runs CPU checks and sanitizers; the hardware release
-gate runs the full suite.
+`make check` needs no model weights. `make check-native-cpu` builds production
+and runs native CPU tests without a GPU; `make check-native-metal` requires a
+supported Metal device and runs the kernel tests under shader validation. They
+include the GGUF kernels on synthetic tensors. Hosted CI runs CPU checks and
+sanitizers; the hardware release gate runs the full suite.
 
 Repeat model tests with `MODEL=incoai/Qwen3.6-35B-A3B-Splash`.
 Before release, install all four agents and run `make release-check MODEL=...`
@@ -366,8 +431,12 @@ for both models from a clean checkout. It includes correctness, sanitizers,
 real HTTP/client behavior and performance checks.
 
 Compare performance on the same idle Mac with the same model and workload.
-`make tune-kernels MODEL=...` measures kernel policies. Keep generated reports,
-profiles, local paths and experiment notes out of the source tree and commits.
+`make tune-kernels MODEL=...` measures the precompiled kernel candidates for the
+installed model on this Mac against the policy defaults in `runtime/ops` and
+prints, per key, the winner with its paired GPU and wall-time gain, spelled as
+the enumerators it would install, or that the default is kept; it changes no
+default and saves no profile. Keep generated reports, profiles, local paths
+and experiment notes out of the source tree and commits.
 
 ### Local benchmarks
 

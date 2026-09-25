@@ -52,29 +52,18 @@ loadQwen3_6MoeWeights(metal::MetalBackend &backend,
   return loadQwenTargetWeights<Qwen3_6MoeWeights>(
       backend, directory, layout, kHeadMagic,
       [&](WeightFile &file, Qwen3_6MoeLayerWeights &layer) {
-        layer.ffn.router = readQ8Projection(
-            file, backend, layout.experts, layout.hiddenSize, "router");
-        layer.ffn.expertGate = readExpertQ4Projection(
-            file, layout.experts, layout.expertIntermediateSize,
-            layout.hiddenSize, "experts-gate");
-        layer.ffn.expertUp = readExpertQ4Projection(
-            file, layout.experts, layout.expertIntermediateSize,
-            layout.hiddenSize, "experts-up");
-        layer.ffn.expertDown = readExpertQ4Projection(
-            file, layout.experts, layout.hiddenSize,
-            layout.expertIntermediateSize, "experts-down");
-        layer.ffn.sharedGate = readExpertQ4Projection(
-            file, 1, layout.expertIntermediateSize, layout.hiddenSize,
-            "shared-expert-gate");
-        layer.ffn.sharedUp = readExpertQ4Projection(
-            file, 1, layout.expertIntermediateSize, layout.hiddenSize,
-            "shared-expert-up");
-        layer.ffn.sharedDown = readExpertQ4Projection(
-            file, 1, layout.hiddenSize, layout.expertIntermediateSize,
-            "shared-expert-down");
-        layer.ffn.sharedExpertGate = readQ8Projection(
-            file, backend, kQ4StorageN, layout.hiddenSize,
-            "shared-expert-scalar-gate");
+        const uint32_t hidden = layout.hiddenSize, width = layout.expertIntermediateSize;
+        layer.ffn = ops::AffineMoeWeights{
+            .router = readAffineQ8Projection(file, layout.experts, hidden, "router"),
+            .expertGate = readAffineExpertProjection(file, layout.experts, width, hidden, "experts-gate"),
+            .expertUp = readAffineExpertProjection(file, layout.experts, width, hidden, "experts-up"),
+            .expertDown = readAffineExpertProjection(file, layout.experts, hidden, width, "experts-down"),
+            .sharedGate = readAffineExpertProjection(file, 1, width, hidden, "shared-expert-gate"),
+            .sharedUp = readAffineExpertProjection(file, 1, width, hidden, "shared-expert-up"),
+            .sharedDown = readAffineExpertProjection(file, 1, hidden, width, "shared-expert-down"),
+            .sharedScalarGate =
+                readAffineQ8Projection(file, kQ4StorageN, hidden, "shared-expert-scalar-gate"),
+        };
       });
 }
 

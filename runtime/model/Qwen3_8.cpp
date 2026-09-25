@@ -40,14 +40,14 @@ Qwen3_8Weights loadQwen3_8Weights(metal::MetalBackend &backend,
   return loadQwenTargetWeights<Qwen3_8Weights>(
       backend, directory, layout, kHeadMagic,
       [&](WeightFile &file, Qwen3_8LayerWeights &layer) {
-        layer.gateProjection = readQ4Projection(
-            file, backend, layout.intermediateSize, layout.hiddenSize,
+        layer.gateProjection = readAffineProjection(
+            file, layout.intermediateSize, layout.hiddenSize,
             "mlp-gate");
-        layer.upProjection = readQ4Projection(
-            file, backend, layout.intermediateSize, layout.hiddenSize,
+        layer.upProjection = readAffineProjection(
+            file, layout.intermediateSize, layout.hiddenSize,
             "mlp-up");
-        layer.downProjection = readQ4Projection(
-            file, backend, layout.hiddenSize, layout.intermediateSize,
+        layer.downProjection = readAffineProjection(
+            file, layout.hiddenSize, layout.intermediateSize,
             "mlp-down");
       });
 }
