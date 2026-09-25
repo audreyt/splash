@@ -380,9 +380,14 @@ class CompletionTests(unittest.TestCase):
                     setup += f"COMP_WORDBREAKS=${{COMP_WORDBREAKS//[{unbroken}]/}}; "
                 setup += 'printf "COMPLETION_READY\\n"\n'
                 keys = b"\t\n"
-            os.write(master, setup.encode())
+            # Typing waits for the prompt: keys that arrive before the line
+            # editor takes the terminal go through its line discipline instead.
+            os.write(master, b"PS1='[splash-test] '; " + setup.encode())
             deadline = time.monotonic() + 15
-            while b"COMPLETION_READY\r\n" not in output:
+            ready = b"COMPLETION_READY\r\n"
+            while ready not in output or (
+                b"[splash-test] " not in output[output.index(ready) :]
+            ):
                 self.assertLess(
                     time.monotonic(), deadline, output.decode(errors="replace")
                 )
