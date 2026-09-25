@@ -494,7 +494,9 @@ class MultiplexedRuntime:
         self._restart_count = 0
         self._startup_attempt: _StartupAttempt | None = None
         self._ready_message: wire.ReadyEvent | None = None
-        self._context_limit: int | None = None
+        self._first_ready: wire.ReadyEvent | None = None
+        # Set when a relaunch cannot help; no further engine is started.
+        self._fatal_error: EngineRuntimeError | None = None
         self._terminal_error: EngineRuntimeError | None = None
         self._pending: dict[int, RuntimeCall] = {}
         self._status_waiters: dict[int, _StatusWaiter] = {}
@@ -722,6 +724,8 @@ class MultiplexedRuntime:
             with self._state_lock:
                 if self._closed:
                     raise RuntimeClosed("runtime is closed")
+                if self._fatal_error is not None:
+                    raise self._fatal_error.restate()
                 process = self._process
                 if (
                     process is not None
@@ -1051,12 +1055,6 @@ class MultiplexedRuntime:
 
     def _dispatch_message(self, generation: int, message: wire.Message) -> None:
         if isinstance(message, wire.ReadyEvent):
-            if int(message.feature_bits) & _REQUIRED_READY_FEATURES != (
-                _REQUIRED_READY_FEATURES
-            ):
-                raise ProtocolFatal(
-                    "native ReadyEvent is missing required native protocol features"
-                )
             with self._state_lock:
                 if generation != self._generation or self._terminal_error is not None:
                     return
@@ -1072,14 +1070,32 @@ class MultiplexedRuntime:
                     raise attempt.error.restate()
                 if time.monotonic() >= attempt.deadline:
                     raise EngineUnhealthy("native ReadyEvent timed out")
-                if (
-                    self._context_limit is not None
-                    and message.max_context_tokens != self._context_limit
+                first = self._first_ready
+                if first is None:
+                    if int(message.feature_bits) & _REQUIRED_READY_FEATURES != (
+                        _REQUIRED_READY_FEATURES
+                    ):
+                        raise ProtocolFatal(
+                            "native ReadyEvent is missing required native "
+                            "protocol features"
+                        )
+                    self._first_ready = message
+                elif (
+                    message.max_context_tokens,
+                    message.max_concurrent_requests,
+                    message.feature_bits,
+                ) != (
+                    first.max_context_tokens,
+                    first.max_concurrent_requests,
+                    first.feature_bits,
                 ):
-                    raise EngineUnhealthy(
-                        "native context window changed; restart the Splash server"
+                    # The frontend serves the first engine's limits. Every
+                    # relaunch would load the model to announce them again.
+                    self._fatal_error = EngineUnhealthy(
+                        "native context window, concurrency or features "
+                        "changed; restart the Splash server"
                     )
-                self._context_limit = message.max_context_tokens
+                    raise self._fatal_error.restate()
                 self._ready_message = message
                 attempt.event.set()
             return

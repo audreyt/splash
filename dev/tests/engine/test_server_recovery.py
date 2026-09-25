@@ -1,4 +1,5 @@
 import concurrent.futures
+import dataclasses
 import http.client
 import json
 import threading
@@ -308,9 +309,17 @@ class ServerRecoveryTests(unittest.TestCase):
         self.assertEqual(runtime.pending_count, 0)
         self.assertEqual(factory.processes[0].stdin.messages(wire.RequestFrame), [])
 
-    def test_restarted_native_context_must_match_the_original_ready_event(self):
-        for context in (65536, 131072):
-            with self.subTest(context=context):
+    def test_restarted_native_must_match_the_original_ready_event(self):
+        original = wire.ReadyEvent(1001, 4, 131072, READY_FEATURES)
+        for restarted in (
+            original,
+            dataclasses.replace(original, max_context_tokens=65536),
+            dataclasses.replace(original, max_concurrent_requests=1),
+            dataclasses.replace(
+                original, feature_bits=READY_FEATURES | wire.ReadyFeature.VISION
+            ),
+        ):
+            with self.subTest(restarted=restarted):
                 factory = FakeFactory()
                 runtime = engine_runtime.MultiplexedRuntime(process_factory=factory)
                 try:
@@ -318,16 +327,17 @@ class ServerRecoveryTests(unittest.TestCase):
                     with mock.patch.object(runtime._crash_trace, "dump"):
                         factory.processes[0].kill()
                         self.wait_until(lambda: not runtime.ready)
-                        factory.initial_output = wire.serialize_message(
-                            wire.ReadyEvent(1001, 4, context, READY_FEATURES)
-                        )
-                        if context == 131072:
+                        factory.initial_output = wire.serialize_message(restarted)
+                        if restarted is original:
                             self.assertTrue(runtime.wait_ready(1))
                         else:
-                            with self.assertRaisesRegex(
-                                engine_runtime.EngineUnhealthy, "context window changed"
-                            ):
-                                runtime.wait_ready(1)
+                            # The difference would recur on every relaunch.
+                            for _ in range(2):
+                                with self.assertRaisesRegex(
+                                    engine_runtime.EngineUnhealthy,
+                                    "restart the Splash server",
+                                ):
+                                    runtime.wait_ready(1)
                             self.assertFalse(runtime.ready)
                     self.assertEqual(runtime.pending_count, 0)
                     self.assertEqual(len(factory.processes), 2)
