@@ -249,7 +249,8 @@ bootstrapConfig(const NativeArguments &arguments) {
 
 // SIGTERM, SIGINT and SIGHUP end the transport loop instead of killing the
 // process, so the KV backing is released one extent at a time by the normal
-// destructors. SIGPIPE is ignored: a closed parent pipe surfaces as EPIPE,
+// destructors. An inherited ignored SIGHUP (nohup) stays ignored, as it does
+// for the server. SIGPIPE is ignored: a closed parent pipe surfaces as EPIPE,
 // which the transport already reports as an I/O failure.
 std::atomic<engine::FdTransport *> gShutdownTransport{nullptr};
 
@@ -272,8 +273,13 @@ public:
     action.sa_handler = requestShutdownFromSignal;
     sigemptyset(&action.sa_mask);
     action.sa_flags = 0;
-    for (const int number : {SIGTERM, SIGINT, SIGHUP})
+    for (const int number : {SIGTERM, SIGINT, SIGHUP}) {
+      struct sigaction inherited {};
+      if (number == SIGHUP && sigaction(number, nullptr, &inherited) == 0 &&
+          inherited.sa_handler == SIG_IGN)
+        continue;
       sigaction(number, &action, nullptr);
+    }
     std::signal(SIGPIPE, SIG_IGN);
   }
   ShutdownSignals(const ShutdownSignals &) = delete;
