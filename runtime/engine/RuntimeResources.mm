@@ -1,4 +1,5 @@
 #include "engine/RuntimeResources.hpp"
+#include "engine/Checked.hpp"
 #include "metal/abi/ExecutionGeometry.h"
 
 #import <Foundation/Foundation.h>
@@ -314,16 +315,28 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
   };
   backend->setOperationGuard(admitMetalOperation);
   try {
-    const uint64_t modelBytes =
-        model::preparedModelWeightBytes(config.modelRoot, config.model);
     const uint64_t hardBudgetBytes = EngineMemoryPolicy::hardBudgetBytes(
         device.recommendedMaxWorkingSetBytes, config.maximumMemoryBytes);
-    // Reject an impossible weight budget before registering model buffers.
-    // The full plan below still uses measured allocations and runtime costs.
-    if (modelBytes > hardBudgetBytes) {
+    // Reject a model that cannot fit before preparing or registering its
+    // weights. Beside them the plan needs at least the runtime reserves, one
+    // state cell and one KV extent; the full plan below adds the arenas.
+    kv::Layout kvLayout = config.model.targetKvLayout;
+    kvLayout.format = config.kvFormat;
+    uint64_t requiredBytes = 0;
+    for (const uint64_t bytes :
+         {model::preparedModelWeightBytes(config.modelRoot, config.model),
+          model::kPipelineReserveBytes, model::kRuntimeOverheadReserveBytes,
+          config.model.stateLayout.activeCellBytes(),
+          uint64_t{kvLayout.backingExtentPages()} *
+              kvLayout.bytesPerModelPage()}) {
+      if (!checkedAdd(requiredBytes, bytes, requiredBytes))
+        requiredBytes = std::numeric_limits<uint64_t>::max();
+    }
+    if (requiredBytes > hardBudgetBytes) {
       throw RuntimeResourcesError(
           RuntimeResourceStage::MemoryPlanning,
-          "model weights require " + std::to_string(modelBytes) +
+          "model weights with the runtime reserves, one state cell and one "
+          "KV extent require " + std::to_string(requiredBytes) +
               " bytes but the Metal memory budget is " +
               std::to_string(hardBudgetBytes) + " bytes",
           deviceStatusJson(device), {}, RuntimeResourceFailure::EngineCapacity);
