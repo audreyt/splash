@@ -1,6 +1,7 @@
 import concurrent.futures
 import dataclasses
 import http.client
+import io
 import json
 import threading
 import time
@@ -10,11 +11,12 @@ from unittest import mock
 
 from dev.tests.engine.test_native_backend import FakeTokenizer as NativeTokenizer
 from dev.tests.engine.test_runtime import READY_FEATURES, FakeFactory
-from dev.tests.test_server import FakeRuntime, Harness, Plan
+from dev.tests.test_server import FakeRuntime, Harness, Plan, main_args
 from install import launcher
 from server import backend as backend_api
 from server import protocol as wire
 from server import runtime as engine_runtime
+from server import server as api
 
 
 class RecoveringRuntime(FakeRuntime):
@@ -308,6 +310,45 @@ class ServerRecoveryTests(unittest.TestCase):
         self.assertTrue(backend.status()["ready"])
         self.assertEqual(runtime.pending_count, 0)
         self.assertEqual(factory.processes[0].stdin.messages(wire.RequestFrame), [])
+
+    def test_startup_protocol_failure_ends_with_one_error_line(self):
+        missing = READY_FEATURES & ~wire.ReadyFeature.MULTIPLEXING
+        runtime_type = engine_runtime.MultiplexedRuntime
+        for output, reason in (
+            (
+                wire.serialize_message(wire.ReadyEvent(1000, 4, 131072, missing)),
+                "missing required native protocol features",
+            ),
+            (b"not a frame".ljust(wire.FRAME_HEADER_BYTES, b"\0"), "bad_magic"),
+        ):
+            with self.subTest(reason=reason):
+                factory = FakeFactory(initial_output=output)
+                with (
+                    mock.patch.object(api, "parse_args", return_value=main_args()),
+                    mock.patch.object(api, "load_thinking_key", return_value=None),
+                    mock.patch.object(
+                        api.AutoTokenizer, "from_pretrained", return_value=object()
+                    ),
+                    mock.patch.object(api, "validate_tokenizer"),
+                    mock.patch.object(api, "ChatTemplates"),
+                    mock.patch.object(
+                        api.engine_runtime,
+                        "MultiplexedRuntime",
+                        side_effect=lambda _command, **options: runtime_type(
+                            process_factory=factory, **options
+                        ),
+                    ),
+                    mock.patch.object(api, "FrontendServer"),
+                    mock.patch.object(api.signal, "signal"),
+                    mock.patch("sys.stdout", new_callable=io.StringIO),
+                    mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+                    self.assertRaisesRegex(SystemExit, "1"),
+                ):
+                    api.main()
+                (line,) = stderr.getvalue().splitlines()
+                self.assertIn("Error · ", line)
+                self.assertIn(reason, line)
+                self.assertIsNotNone(factory.processes[0].poll())
 
     def test_restarted_native_must_match_the_original_ready_event(self):
         original = wire.ReadyEvent(1001, 4, 131072, READY_FEATURES)

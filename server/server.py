@@ -2053,7 +2053,7 @@ def main():
         print_status(f"Ready · {args.model} · context {context}{mode} · {address}")
         server.serve_forever()
     except (
-        engine_runtime.EngineUnhealthy,
+        engine_runtime.EngineRuntimeError,
         ThinkingKeyError,
         ChatTemplateError,
     ) as error:
