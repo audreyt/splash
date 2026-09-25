@@ -150,6 +150,42 @@ void checkMoe(const std::filesystem::path &directory) {
   check(layer.repacks.size() == quantized, "planner repacks only the layer's quantized tensors");
 }
 
+// The rotary embedding and norms the kernels compute: a GGUF declares their
+// RoPE base, rotated dimensions and RMS epsilon, and no RoPE scaling.
+void checkRotary(const std::filesystem::path &directory) {
+  const SmallTarget target = smallTarget(false);
+  const model::gguf::TargetGeometry &g = target.geometry;
+  const auto path = directory / "rotary.gguf";
+  const auto planned = [&](const std::vector<test_gguf::Key> &keys) {
+    splash::test::writeFile(path, test_gguf::file(keys, target.tensors));
+    return plan(path, g);
+  };
+  const std::string scaling = g.architecture() + std::string(".rope.scaling.type");
+  std::vector<test_gguf::Key> keys = metadata(g);
+  keys.push_back(test_gguf::stringKey(scaling, "none"));
+  check(!planned(keys).error, "planner accepts a GGUF that declares no RoPE scaling");
+  keys.back() = test_gguf::stringKey(scaling, "yarn");
+  check(names(planned(keys), {"rope.scaling.type yarn (expected none)"}), "planner refuses RoPE scaling");
+
+  model::gguf::TargetGeometry other = g;
+  other.rotaryPairs = 64;
+  other.rotaryTheta = 1e6F;
+  keys = metadata(other);
+  for (test_gguf::Key &key : keys)
+    if (key.name.ends_with(".attention.layer_norm_rms_epsilon")) key = test_gguf::float32Key(key.name, 1e-5F);
+  check(names(planned(keys), {"rope.dimension_count 128 (expected 64)", "rope.freq_base 1e+06 (expected 1e+07)",
+                              "attention.layer_norm_rms_epsilon 1e-05 (expected 1e-06)"}),
+        "planner names another rotated width, RoPE base and RMS epsilon");
+
+  keys = metadata(g);
+  std::erase_if(keys, [](const test_gguf::Key &key) {
+    return key.name.find(".rope.") != std::string::npos || key.name.ends_with(".layer_norm_rms_epsilon");
+  });
+  check(names(planned(keys), {"rope.dimension_count missing", "rope.freq_base missing",
+                              "attention.layer_norm_rms_epsilon missing"}),
+        "planner requires the rotary and norm metadata");
+}
+
 } // namespace
 
 int main() {
@@ -157,6 +193,7 @@ int main() {
     const splash::test::TemporaryDirectory directory("splash-gguf-planner");
     guarded("planner on the dense target", [&] { checkDense(directory.path()); });
     guarded("planner on the MoE target", [&] { checkMoe(directory.path()); });
+    guarded("planner on the rotary metadata", [&] { checkRotary(directory.path()); });
     std::printf("%s (%d failures)\n", failures ? "GGUF planner tests FAILED" : "GGUF planner tests passed", failures);
     return failures ? 1 : 0;
   }

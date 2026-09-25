@@ -263,8 +263,11 @@ UD-IQ4_XS and every larger file but MXFP4_MOE, UD-Q8_K_XL and BF16. The smaller
 files need IQ3_XXS, IQ2, IQ1 or Q2_K kernels and the others Q4_0/Q4_1, MXFP4 or
 BF16 ones, which do not exist yet.
 
-At load time the engine validates the GGUF metadata and plans the `MDGG0001`
-layout. `GgufPreparation` stages rows in image order on the CPU within the
+At load time the engine validates the GGUF metadata, including the rotary
+embedding and norm epsilon the kernels assume (`rope.freq_base`,
+`rope.dimension_count`, `attention.layer_norm_rms_epsilon`, and no
+`rope.scaling.type` but `none`), and plans the `MDGG0001` layout.
+`GgufPreparation` stages rows in image order on the CPU within the
 staging bound, splitting rows wider than it into column chunks, runs the
 `gguf_repack` kernel, and writes its planes into a prepared file. Embeddings
 and F32 sections use bounded direct copies.

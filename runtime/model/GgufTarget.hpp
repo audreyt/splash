@@ -58,6 +58,8 @@ template <class Layout>
   geometry.attentionWidth = layout.attentionWidth;
   geometry.attentionKvHeads = layout.attentionKvHeads;
   geometry.attentionHeadDimension = layout.attentionHeadDimension;
+  geometry.rotaryPairs = layout.rotaryPairs;
+  geometry.rotaryTheta = layout.rotaryTheta;
   geometry.fullAttentionPeriod = layout.fullAttentionPeriod;
   if constexpr (Layout::ffnKind == QwenFfnKind::SparseMoe) {
     geometry.experts = layout.experts;

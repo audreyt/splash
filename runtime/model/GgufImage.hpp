@@ -27,6 +27,9 @@ struct TargetGeometry {
   uint32_t attentionWidth = 0;
   uint32_t attentionKvHeads = 0;
   uint32_t attentionHeadDimension = 0;
+  // The rotated dimension pairs of each attention head and their RoPE base.
+  uint32_t rotaryPairs = 0;
+  float rotaryTheta = 0.0F;
   uint32_t fullAttentionPeriod = 0;
   // A sparse MoE FFN (qwen35moe) when experts is set; the shared expert has
   // the routed experts' intermediate width.
@@ -96,9 +99,9 @@ struct Image {
 };
 
 // The layers' images, then the head's and the embedding's. Checks the
-// architecture and the geometry the metadata declares and each tensor's
-// shape; throws GgufError naming every missing tensor and every tensor of a
-// type this build cannot load.
+// architecture, the geometry the metadata declares, its rotary embedding and
+// norms included, and each tensor's shape; throws GgufError naming every
+// missing tensor and every tensor of a type this build cannot load.
 [[nodiscard]] std::vector<Image> planImages(const GgufFile &file, const TargetGeometry &geometry);
 
 } // namespace splash::model::gguf

@@ -5,9 +5,11 @@
 #include "model/StateLayout.hpp"
 #include "model/WeightLayout.hpp"
 
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <optional>
+#include <sstream>
 
 namespace splash::model::gguf {
 namespace {
@@ -231,7 +233,9 @@ private:
 
 std::string prefix(uint32_t layer) { return "blk." + std::to_string(layer) + "."; }
 
-// The target geometry the metadata declares; one error names every mismatch.
+// The target geometry the metadata declares, with the rotary embedding and
+// norms the kernels compute: the RoPE base and rotated dimensions, the RMS
+// epsilon and no RoPE scaling. One error names every mismatch.
 void requireMetadata(const GgufFile &file, const TargetGeometry &geometry) {
   const std::string arch = geometry.architecture();
   if (file.architecture() != arch)
@@ -243,12 +247,28 @@ void requireMetadata(const GgufFile &file, const TargetGeometry &geometry) {
       mismatched += (mismatched.empty() ? "" : ", ") + std::string(key) + " " +
                     (found ? std::to_string(*found) : "missing") + " (expected " + std::to_string(value) + ")";
   };
+  // A float equal to value up to its F32 rounding.
+  const auto expectFloat = [&](const char *key, double value) {
+    const std::optional<double> found = file.floatValue(arch + "." + key);
+    if (found && std::abs(*found - value) <= value * 1e-6) return;
+    std::ostringstream text;
+    text << (mismatched.empty() ? "" : ", ") << key << ' ';
+    if (found) text << *found;
+    else text << "missing";
+    text << " (expected " << value << ')';
+    mismatched += text.str();
+  };
   expect("block_count", geometry.layers + file.unsignedValue(arch + ".nextn_predict_layers").value_or(0));
   expect("embedding_length", geometry.hiddenSize);
   expect("attention.head_count", geometry.attentionWidth / geometry.attentionHeadDimension);
   expect("attention.head_count_kv", geometry.attentionKvHeads);
   expect("attention.key_length", geometry.attentionHeadDimension);
   expect("attention.value_length", geometry.attentionHeadDimension);
+  expect("rope.dimension_count", 2ull * geometry.rotaryPairs);
+  expectFloat("rope.freq_base", geometry.rotaryTheta);
+  expectFloat("attention.layer_norm_rms_epsilon", 1e-6);
+  if (const auto scaling = file.stringValue(arch + ".rope.scaling.type"); scaling && *scaling != "none")
+    mismatched += (mismatched.empty() ? "" : ", ") + std::string("rope.scaling.type ") + *scaling + " (expected none)";
   expect("full_attention_interval", geometry.fullAttentionPeriod);
   expect("ssm.conv_kernel", kGdnConvolutionTaps);
   expect("ssm.group_count", geometry.gdnKeyHeads);

@@ -221,6 +221,8 @@ inline SmallTarget smallTarget(bool moe) {
   g.attentionWidth = 512; // two query heads of 256
   g.attentionKvHeads = 2;
   g.attentionHeadDimension = 256;
+  g.rotaryPairs = 32; // 64 of the 256 dimensions, at the real targets' base
+  g.rotaryTheta = 1e7F;
   g.fullAttentionPeriod = 2; // layer 1
   if (moe) {
     g.layers = 1;
@@ -282,6 +284,9 @@ inline std::vector<test_gguf::Key> metadata(const model::gguf::TargetGeometry &g
   key("attention.head_count_kv", g.attentionKvHeads);
   key("attention.key_length", g.attentionHeadDimension);
   key("attention.value_length", g.attentionHeadDimension);
+  key("rope.dimension_count", 2 * g.rotaryPairs);
+  keys.push_back(test_gguf::float32Key(arch + ".rope.freq_base", g.rotaryTheta));
+  keys.push_back(test_gguf::float32Key(arch + ".attention.layer_norm_rms_epsilon", 1e-6F));
   key("full_attention_interval", g.fullAttentionPeriod);
   key("ssm.conv_kernel", model::kGdnConvolutionTaps);
   key("ssm.group_count", g.gdnKeyHeads);
