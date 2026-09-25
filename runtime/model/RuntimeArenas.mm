@@ -232,7 +232,7 @@ decodeTensorBytes(const RuntimeGeometry &geometry,
   put(DecodeTensor::FinalHidden,
       bytesFor<uint16_t>(r * geometry.target.hiddenSize));
   put(DecodeTensor::Logits,
-      bytesFor<uint16_t>(r * geometry.target.vocabularySize));
+      bytesFor<float>(r * geometry.target.vocabularySize));
   put(DecodeTensor::ArgmaxValues, samplingWorkspace.argmaxValuesBytes);
   put(DecodeTensor::ArgmaxIndices, samplingWorkspace.argmaxIndicesBytes);
   put(DecodeTensor::TargetTopPartialIds, samplingWorkspace.partialIdsBytes);

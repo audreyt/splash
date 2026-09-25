@@ -101,10 +101,10 @@ template <class F> inline Coef<F> coefficient(CoefSource<F> src, uint u, uint j)
 }
 
 // One threadgroup: 4 simdgroups x GGUF_REGISTER_COLUMNS = GGUF_TILE_COLUMNS columns of one segment,
-// L request lanes of eight rows, one K partition (tg.y) of `splits`.
-template <class F, uint L, GgufEpilogue Ep>
+// L request lanes of eight rows, one K partition (tg.y) of `splits`, into a destination of type Out.
+template <class F, uint L, GgufEpilogue Ep, class Out>
 inline void decode(device const bfloat *table, device const float *sums, device uchar *w0,
-                   device uchar *w1, device uchar *meta, device bfloat *out,
+                   device uchar *w1, device uchar *meta, device Out *out,
                    device coherent(device) float *partials, device atomic_uint *counters,
                    device const bfloat *aux, const GgufDecodeParams p, uint2 tg, uint tid, uint sg,
                    uint lane, threadgroup const bfloat2 *lut, threadgroup Coef<F> *coefs,
@@ -260,7 +260,7 @@ inline void decode(device const bfloat *table, device const float *sums, device 
 #pragma unroll
       for (uint i = 0; i < 2; ++i) {
         const ulong at = ulong(r * 8 + fn + i) * p.out_stride + column;
-        out[at] = gguf_epilogue<Ep>(acc[r][nf][i], aux, at);
+        out[at] = gguf_epilogue<Ep, Out>(acc[r][nf][i], aux, at);
       }
     }
 }
@@ -291,10 +291,10 @@ template <class F> inline void codebook_lut(threadgroup bfloat2 *lut, uint tid) 
   }
 }
 
-#define GGUF_SG_KERNEL(Name, F, L, EP)                                                                        \
+#define GGUF_SG_KERNEL(Name, F, L, EP, Out)                                                                   \
   kernel void Name(device const bfloat *table [[buffer(0)]], device const float *sums [[buffer(1)]],       \
                    device uchar *w0 [[buffer(2)]], device uchar *w1 [[buffer(3)]],                          \
-                   device uchar *meta [[buffer(4)]], device bfloat *out [[buffer(5)]],                      \
+                   device uchar *meta [[buffer(4)]], device Out *out [[buffer(5)]],                         \
                    device coherent(device) float *partials [[buffer(6)]],                                   \
                    device atomic_uint *counters [[buffer(7)]], device const bfloat *aux [[buffer(8)]],      \
                    constant GgufDecodeParams &p [[buffer(9)]], uint2 tg [[threadgroup_position_in_grid]],       \
@@ -307,10 +307,12 @@ template <class F> inline void codebook_lut(threadgroup bfloat2 *lut, uint tid) 
     gguf_sg::decode<F, L, EP>(table, sums, w0, w1, meta, out, partials, counters, aux, p, tg, tid, sg, lane, \
                               lut, coefs, &arrival);                                                        \
   }
+// Each epilogue into bf16, and the plain one also into fp32 (_a_f32: the logits, ops::Projection::destination).
 #define GGUF_SG_EPILOGUES(F, f, L)                                                                            \
-  GGUF_SG_KERNEL(gguf_decode_sg_##f##_l##L##_a, F, L, EpNone)                                        \
-  GGUF_SG_KERNEL(gguf_decode_sg_##f##_l##L##_r, F, L, EpResidual)                                    \
-  GGUF_SG_KERNEL(gguf_decode_sg_##f##_l##L##_g, F, L, EpUpWithGate)
+  GGUF_SG_KERNEL(gguf_decode_sg_##f##_l##L##_a, F, L, EpNone, bfloat)                                \
+  GGUF_SG_KERNEL(gguf_decode_sg_##f##_l##L##_a_f32, F, L, EpNone, float)                             \
+  GGUF_SG_KERNEL(gguf_decode_sg_##f##_l##L##_r, F, L, EpResidual, bfloat)                            \
+  GGUF_SG_KERNEL(gguf_decode_sg_##f##_l##L##_g, F, L, EpUpWithGate, bfloat)
 #define GGUF_SG_FORMAT(F, f) \
   GGUF_SG_EPILOGUES(F, f, 1) GGUF_SG_EPILOGUES(F, f, 2) GGUF_SG_EPILOGUES(F, f, 3) GGUF_SG_EPILOGUES(F, f, 4)
 QUANT_FORMATS(GGUF_SG_FORMAT)

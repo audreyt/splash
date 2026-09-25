@@ -40,6 +40,7 @@ struct DraftSelectorWorkspace final {
 };
 
 struct SamplingBuffers final {
+  // fp32 [rows][vocabulary].
   metal::MetalBuffer logits;
   metal::MetalBuffer partialIds;
   metal::MetalBuffer partialValues;
@@ -53,6 +54,7 @@ struct SamplingBuffers final {
 };
 
 struct DraftSelectorBuffers final {
+  // fp32 [rows][vocabulary].
   metal::MetalBuffer logits;
   metal::MetalBuffer partialIds;
   metal::MetalBuffer partialValues;

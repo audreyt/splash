@@ -23,6 +23,13 @@ struct ProjectionShape final {
   auto operator<=>(const ProjectionShape &) const = default;
 };
 
+// The element type a projection writes: bf16, or fp32 for the vocabulary
+// head's logits and a float segment's router scores.
+enum class FloatOutput : uint8_t { BFloat16, Float32 };
+[[nodiscard]] constexpr uint64_t elementBytes(FloatOutput type) noexcept {
+  return type == FloatOutput::Float32 ? sizeof(float) : sizeof(uint16_t);
+}
+
 struct AffineWeights final {
   metal::MetalBuffer weights;
   metal::MetalBuffer scales;
@@ -139,6 +146,9 @@ public:
 
   uint32_t outputSize = 0;
   uint32_t inputSize = 0;
+  // fp32 only for plain decode plans (Linear::plan), which keep the tile of
+  // the bf16 plan.
+  FloatOutput destination = FloatOutput::BFloat16;
 };
 
 // A token table's rows as the GGUF stores them: block_q4_K, block_q6_K or

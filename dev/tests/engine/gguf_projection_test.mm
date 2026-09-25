@@ -3,7 +3,8 @@
 // config), so every GPU runs both decode tiles:
 // - decode: the Apple9 register tile and the staged tile at one to four lanes (three on the staged 32-row tile over
 //   NaN padding rows), every K split, each epilogue, dense inputs and sparse ones past half's range; a lane's rows
-//   equal a one-lane projection of them bitwise;
+//   equal a one-lane projection of them bitwise; the plain epilogue into fp32 (the logits) holds the values its
+//   bf16 output rounds, bit for bit, each within fp64 before rounding;
 // - fused: three segments of different formats in one projection equal the projections of each segment alone;
 // - gate/up: every gate and up format pair;
 // - prefill: 128-row tiles with each epilogue, whose simdgroups past the chunk write nothing, and chunks of up to 32
@@ -22,6 +23,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -346,6 +348,34 @@ void checkValues(const Outcome &out, const std::vector<Dot> &dots, const std::ve
   if (outside) fail(label + ": " + std::to_string(outside) + " values outside the fp64 bound; " + first);
 }
 
+// The fp32 destination of `plan` (the logits) over the input rows `x` of `bf16`, the run of its bf16 plan: every
+// value of the active rows and covered columns rounds to that run's output bit for bit and lies within fp64 before
+// the rounding; the padding columns, guards and counters stay as they were.
+void floatOutput(MetalBackend &backend, const Linear &linear, const LinearPlan &plan, const Projection &p,
+                 const std::vector<uint16_t> &x, const Outcome &bf16, const std::vector<Dot> &dots, uint32_t covered,
+                 bool staged, const std::string &label) {
+  const uint32_t columns = plan.workload().matrix.outputSize;
+  const Scratch scratch(backend, plan.scratchSize());
+  const Guarded input = bfloats(backend, x);
+  const Guarded output(backend, uint64_t{plan.storageRows()} * columns * sizeof(float), 0xFF);
+  scratch.poison(kPoisonNaN);
+  CommandGraph graph;
+  static_cast<void>(linear.add(graph, {.input = input.view, .output = output.view, .scratch = scratch.bindings()},
+                               p, plan));
+  static_cast<void>(backend.submitCommand(graph.dispatches()));
+  if (!scratch.intact() || !input.intact() || !output.intact())
+    fail(label + " fp32: a counter is not reset or a write past a buffer");
+  const auto *values = static_cast<const uint32_t *>(output.view.contents());
+  uint64_t wrong = 0;
+  for (uint64_t i = 0; i < uint64_t{plan.workload().rows} * columns; ++i) {
+    const float value = std::bit_cast<float>(values[i]);
+    wrong += i % columns >= covered ? values[i] != 0xFFFFFFFFu
+                                    : floatToBf16(value) != bf16.output[i] ||
+                                          !(std::fabs(value - dots[i].value) <= projectionBound(dots[i], staged));
+  }
+  if (wrong) fail(label + " fp32: " + std::to_string(wrong) + " values differ from the bf16 run or fp64");
+}
+
 bool sameRows(const std::vector<uint16_t> &a, uint64_t aRow, const std::vector<uint16_t> &b, uint64_t bRow,
               uint32_t rows, uint32_t columns) {
   return std::equal(a.begin() + aRow * columns, a.begin() + (aRow + rows) * columns, b.begin() + bRow * columns);
@@ -403,6 +433,9 @@ void decodeTile(MetalBackend &backend, const Linear &linear, LinearTile tile) {
             const Outcome out = run(backend, linear, plan, up, gated, storageRows(x, K, rows, storage), aux,
                                     kPoisonFinite, N, label);
             checkValues(out, dots, gateDots, aux, wl, rows, N, staged, label);
+            if (epilogue == LinearEpilogue::None)
+              floatOutput(backend, linear, Linear::plan(wl, config(tile, wl, splits), FloatOutput::Float32), up,
+                          storageRows(x, K, rows, storage), out, dots, N, staged, label);
             for (uint32_t lane = 0; lane < lanes; ++lane)
               if (!sameRows(out.output, lane * kLaneRows, lanesAlone[lane].output, 0, kLaneRows, columns))
                 fail(label + ": lane " + std::to_string(lane) + " differs from its one-lane projection");
@@ -411,7 +444,7 @@ void decodeTile(MetalBackend &backend, const Linear &linear, LinearTile tile) {
     }
   }
   section(std::string(tileName(tile)) + " decode: 8 formats, 1-4 lanes, S 1-8, plain/residual/gate-up, dense and "
-          "sparse inputs within fp64, lanes equal to one-lane projections");
+          "sparse inputs within fp64, lanes equal to one-lane projections, fp32 plain outputs rounding to bf16's");
 }
 
 // One fused projection of three segments of different formats ([512 | 256 | 256, 2048]): at every lane count and K

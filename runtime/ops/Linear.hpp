@@ -9,13 +9,17 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
 namespace splash::ops {
 
-// The destination element type of a float segment's projection.
-enum class FloatOutput : uint8_t { BFloat16, Float32 };
+// The instance of kernel `name` that writes `destination`: a plain decode
+// kernel's fp32 instance is "<name>_f32".
+[[nodiscard]] inline std::string kernelInstance(std::string_view name, FloatOutput destination) {
+  return std::string(name) + (destination == FloatOutput::Float32 ? "_f32" : "");
+}
 // The tile of a float projection (kernels/shared/gguf_float.metal): fp32
 // simdgroup MMA on the weights as stored, or the neural accelerator's bf16
 // matmul on each weight's three bf16 parts, which sum to it exactly. Both
@@ -136,6 +140,7 @@ class LinearPlan final {
 public:
   [[nodiscard]] LinearWorkload workload() const noexcept { return workload_; }
   [[nodiscard]] LinearConfig configuration() const noexcept { return config_; }
+  [[nodiscard]] FloatOutput destination() const noexcept { return destination_; }
   [[nodiscard]] uint32_t storageRows() const noexcept;
   [[nodiscard]] uint32_t tileColumns() const noexcept;
   [[nodiscard]] uint32_t threadsPerThreadgroup() const noexcept;
@@ -150,6 +155,7 @@ public:
   [[nodiscard]] uint64_t sumsBytes() const noexcept;
   [[nodiscard]] uint64_t gateScratchBytes() const noexcept;
   [[nodiscard]] uint64_t downSumsBytes() const noexcept;
+  // The affine tile's kernel; the plan runs its kernelInstance for destination().
   [[nodiscard]] std::string_view pipeline() const noexcept { return pipeline_; }
   [[nodiscard]] std::string_view secondPipeline() const noexcept {
     return secondPipeline_;
@@ -157,13 +163,14 @@ public:
 
 private:
   friend class Linear;
-  LinearPlan(LinearWorkload workload, LinearConfig config);
+  LinearPlan(LinearWorkload workload, LinearConfig config, FloatOutput destination = FloatOutput::BFloat16);
   // Block plans (LinearGguf.cpp).
   void requireBlockConfiguration() const;
   [[nodiscard]] uint32_t blockStorageRows() const noexcept;
   [[nodiscard]] LinearScratchSize blockScratchSize() const noexcept;
   LinearWorkload workload_;
   LinearConfig config_;
+  FloatOutput destination_;
   std::string_view pipeline_;
   std::string_view secondPipeline_;
 };
@@ -204,7 +211,7 @@ public:
   static constexpr std::size_t kMaximumCandidates = 20;
 
   [[nodiscard]] LinearPlan plan(LinearWorkload workload) const;
-  // The plan of `workload` in the projection's weight layout.
+  // The plan of `workload` in the projection's weight layout, into its destination type.
   [[nodiscard]] LinearPlan plan(LinearWorkload workload, const Projection &projection) const;
   // Rows of storage a decode step of `rows` rows binds for a projection of
   // `shape`: the storageRows of its decode plans, which every epilogue shares.
@@ -223,7 +230,8 @@ public:
   // The tile of a float projection of `rows` rows into `outputSize` columns
   // on this device (LinearGguf.cpp).
   [[nodiscard]] FloatTile ggufFloatTile(uint32_t rows, uint32_t outputSize) const noexcept;
-  [[nodiscard]] static LinearPlan plan(LinearWorkload workload, LinearConfig config);
+  [[nodiscard]] static LinearPlan plan(LinearWorkload workload, LinearConfig config,
+                                       FloatOutput destination = FloatOutput::BFloat16);
   [[nodiscard]] std::vector<LinearPlan> candidates(LinearWorkload workload) const;
   // Installed only at startup; encoding does a read-only lookup, never tuning.
   // Block projection plans are not tuned: their workloads take no choice.
