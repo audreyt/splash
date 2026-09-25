@@ -57,6 +57,8 @@ inline constexpr uint64_t kHostRecoveryMarginBytes = 2ULL << 30;
 
 struct MemoryGovernorSnapshot {
   uint64_t limitBytes = 0;
+  // Charged against the limit: the backend's resident buffers plus the
+  // untracked reserve, or the device's allocation when that is larger.
   uint64_t observedResidentBytes = 0;
   uint64_t reservedBytes = 0;
   uint64_t headroomBytes = 0;
@@ -128,9 +130,13 @@ public:
 
   MemoryGovernor(metal::MetalBackend &backend, uint64_t limitBytes,
                  uint64_t hostReserveBytes);
+  // Metal memory outside the backend's buffers (pipelines, driver
+  // allocations) is charged only beyond untrackedReserveBytes, the part of
+  // the limit the caller has set aside for it.
   MemoryGovernor(metal::MetalBackend &backend, uint64_t limitBytes,
                  uint64_t hostReserveBytes,
-                 HostAvailableMemoryProvider hostAvailableMemory);
+                 HostAvailableMemoryProvider hostAvailableMemory,
+                 uint64_t untrackedReserveBytes = 0);
 
   [[nodiscard]] std::optional<Reservation> tryReserve(
       uint64_t bytes, metal::AllocationFailure *failure = nullptr);
@@ -157,6 +163,7 @@ private:
   uint64_t limitBytes_ = 0;
   uint64_t hostReserveBytes_ = 0;
   HostAvailableMemoryProvider hostAvailableMemory_;
+  uint64_t untrackedReserveBytes_ = 0;
   mutable std::mutex mutex_;
   uint64_t reservedBytes_ = 0;
   uint64_t deniedReservations_ = 0;

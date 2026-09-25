@@ -128,10 +128,12 @@ MemoryGovernor::MemoryGovernor(metal::MetalBackend &backend,
 MemoryGovernor::MemoryGovernor(
     metal::MetalBackend &backend, uint64_t limitBytes,
     uint64_t hostReserveBytes,
-    HostAvailableMemoryProvider hostAvailableMemory)
+    HostAvailableMemoryProvider hostAvailableMemory,
+    uint64_t untrackedReserveBytes)
     : backend_(backend), limitBytes_(limitBytes),
       hostReserveBytes_(hostReserveBytes),
-      hostAvailableMemory_(std::move(hostAvailableMemory)) {
+      hostAvailableMemory_(std::move(hostAvailableMemory)),
+      untrackedReserveBytes_(untrackedReserveBytes) {
   if (!limitBytes_) {
     throw std::invalid_argument("memory governor limit must be positive");
   }
@@ -160,12 +162,14 @@ MemoryGovernor::observedResidentBytes(bool refreshDevice) const noexcept {
   metal::MetalMemoryStats memory = refreshDevice
       ? backend_.refreshMemoryStats()
       : backend_.memoryStats();
+  // The backend's buffers are charged in full, the rest of the device's
+  // footprint only where it exceeds the untracked reserve.
   uint64_t accounted = memory.allocatedBytes;
-  if (memory.sparseResidentBytes <=
-      std::numeric_limits<uint64_t>::max() - accounted) {
-    accounted += memory.sparseResidentBytes;
-  } else {
-    accounted = std::numeric_limits<uint64_t>::max();
+  for (const uint64_t bytes :
+       {memory.sparseResidentBytes, untrackedReserveBytes_}) {
+    accounted = bytes <= std::numeric_limits<uint64_t>::max() - accounted
+        ? accounted + bytes
+        : std::numeric_limits<uint64_t>::max();
   }
   return std::max(accounted, memory.deviceCurrentAllocatedBytes);
 }

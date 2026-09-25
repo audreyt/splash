@@ -420,16 +420,13 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
     const EngineMemoryBreakdown &baselineBudget = baselineMemoryPlan.breakdown();
     const uint64_t runtimeReserve =
         baselineBudget.pipelineReserveBytes + baselineBudget.runtimeOverheadReserveBytes;
-    if (baselineBudget.hardBudgetBytes <= runtimeReserve) {
-      throw std::logic_error("runtime reserves consume the Metal budget");
-    }
-    // The governor observes the complete Metal footprint. Keeping explicit
-    // pipeline/allocator reserves outside its growth ceiling prevents elastic
-    // state and KV from silently consuming the startup safety margin.
-    const uint64_t elasticGrowthCeiling =
-        baselineBudget.hardBudgetBytes - runtimeReserve;
+    // The governor holds the complete Metal footprint to the hard budget. The
+    // plan budgets pipelines and driver allocations inside the pipeline and
+    // allocator reserves, so memory outside the backend's buffers is charged
+    // only beyond them, and elastic state and KV never grow into them.
     auto memoryGovernor = std::make_unique<MemoryGovernor>(
-        *backend, elasticGrowthCeiling, hostReserveBytes, hostAvailableMemory);
+        *backend, baselineBudget.hardBudgetBytes, hostReserveBytes,
+        hostAvailableMemory, runtimeReserve);
     if (config.memoryPressure)
       memoryGovernor->setPressure(config.memoryPressure());
     std::string rejected;
