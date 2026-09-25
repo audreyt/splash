@@ -154,28 +154,32 @@ files from different revisions. It pins those snapshots in the Hub cache
 an installed model links.
 
 Every start resolves the target's revision (the default branch, or
-`--revision`) with one Hub request of at most 5 seconds (`hub.HUB_TIMEOUT`);
-`hub.Repository.resolve` alone decides whether the Hub is asked:
+`--revision`) with one Hub request of at most 5 seconds (`hub.HUB_TIMEOUT`),
+and when the Hub answered, the default branch of the draft's repository
+([Drafts](#drafts)) with another; `hub.Repository.resolve` alone decides
+whether the Hub is asked:
 
-- The installed commit: the assembly's links, sizes and times are checked and
-  it starts. It is re-assembled first when this release pins another draft for
-  the family or changed the GGUF metadata adapter; if that draft cannot be
+- The installed commits: the assembly's links, sizes and times are checked and
+  it starts. It is re-assembled first when the draft's repository moved or
+  this release changed the GGUF metadata adapter; if the new draft cannot be
   fetched, the installed one is kept.
 - A new commit: only changed files are downloaded, and the new assembly
   replaces the installed one atomically once published.
 - No answer, or a new commit that cannot be installed: the installed model
   starts, with one line naming the Hub's reason or, on stderr, the
   installation attempt that failed.
-- A 40-hex `--revision` never moves and `HF_HUB_OFFLINE=1` forbids the Hub:
-  both start a verified installation without a request.
+- A 40-hex `--revision` never moves, nor does its draft, and
+  `HF_HUB_OFFLINE=1` forbids the Hub: both start a verified installation
+  without a request.
 
 There is no update flag; to stay on one commit, pass it as `--revision`. A
 missing assembly, or one that no longer verifies, is built again. Without the
 Hub it is built from a cached snapshot, of the commit the `--revision` names,
 or else the one the installation recorded or pinned, or one the Hub cache
 records for the branch, never of another revision. Only files downloaded before
-are available, which is enough to rebuild a damaged or deleted assembly. The
-installer never rewrites upstream files.
+are available, which is enough to rebuild a damaged or deleted assembly; a new
+selection needs the Hub once for its draft's default branch. The installer
+never rewrites upstream files.
 
 ### Model cache
 
@@ -193,10 +197,12 @@ which this does not move ([Weight preparation](#weight-preparation)).
 
 ### Drafts
 
-Each family pins the DFlash2 checkpoint trained for it as its repository
-releases it, `config.json` and BF16 safetensors, at one commit (`Draft` in
-`families.FAMILIES`). Installation downloads only those files; `--draft-model`
-accepts another repository or a local directory that holds them. Native
+Each family names the repository of the DFlash2 checkpoint trained for it
+(`Draft` in `families.FAMILIES`), which holds it as the release publishes it:
+`config.json` and BF16 safetensors. Installation downloads only those files
+and follows the repository's default branch as it follows the target's
+([Revisions](#revisions)); `--draft-model` accepts another repository,
+followed the same way, or a local directory that holds them. Native
 loading validates the configuration against the target and prepares the
 draft like a target ([Weight preparation](#weight-preparation)):
 `DraftCheckpointLoader` (`DraftCheckpoint.cpp`) plans the packed draft files

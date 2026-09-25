@@ -97,10 +97,11 @@ and reports `vision: false` in `/status` and `/v1/models`.
 The prepared weights live in `~/Library/Caches/Splash/weights`
 (`SPLASH_WEIGHT_CACHE` relocates them); preparation uses bounded temporary
 memory, and later starts reuse the result. Each start checks the upstream
-revision with one Hub request of at most 5 seconds and installs a new commit
-before serving it; without the Hub, or when the new commit cannot be installed,
-the installed model starts. `--revision` selects an upstream branch, tag or
-commit (a commit is never checked again); otherwise the default branch is
+revisions of the model and of its draft, with one Hub request each of at most
+5 seconds, and installs a new commit before serving it; without the Hub, or
+when the new commit cannot be installed, the installed model starts.
+`--revision` selects an upstream branch, tag or commit of the model (a commit
+is never checked again, nor is its draft); otherwise the default branch is
 followed. Private repositories need `HF_TOKEN`. Downloads use the Hugging Face
 cache, and `brew upgrade splash` preserves models and agent sessions.
 

@@ -14,6 +14,7 @@ import httpx
 from dev.benchmarks import prepared
 from dev.tests.installer_fixtures import (
     DENSE,
+    DRAFT_COMMIT,
     MODEL,
     draft_dir,
     fake_hub,
@@ -203,7 +204,7 @@ class InstallerRestartsTest(unittest.TestCase):
     def test_prepared_names_the_entries_of_the_installations_sources(self):
         fake = fake_hub(self, self.cache)
         fake.publish(MODEL, "a" * 40, safetensors_target)
-        fake.publish(DENSE.draft.repo, DENSE.draft.revision, safetensors_draft)
+        fake.publish(DENSE.draft.repo, DRAFT_COMMIT, safetensors_draft)
         chosen = selection(self.root)
         with (
             contextlib.redirect_stdout(io.StringIO()),

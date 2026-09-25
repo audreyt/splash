@@ -15,6 +15,7 @@ from huggingface_hub.errors import IncompleteSnapshotError
 
 from dev.tests.installer_fixtures import (
     DENSE,
+    DRAFT_COMMIT,
     MODEL,
     MOE,
     PROCESSOR,
@@ -48,11 +49,12 @@ class UpstreamTest(unittest.TestCase):
             upstream.prepare(chosen)
         return output.getvalue(), warnings.getvalue()
 
-    def test_every_family_pins_a_published_draft_commit(self):
-        for family in families.FAMILIES:
-            with self.subTest(family=family.name):
-                self.assertTrue(models.is_hex_digest(family.draft.revision, 40))
-                self.assertEqual(family.draft.revision, family.draft.revision.lower())
+    def test_every_family_names_its_own_draft_repository(self):
+        repos = [family.draft.repo for family in families.FAMILIES]
+        for repo in repos:
+            with self.subTest(repo=repo):
+                self.assertEqual(models.validate_repo_id(repo), repo)
+        self.assertEqual(len(set(repos)), len(repos))
 
     def test_family_is_identified_by_architecture_not_name(self):
         for family in families.FAMILIES:
@@ -285,7 +287,7 @@ class UpstreamTest(unittest.TestCase):
         fake.publish(
             "someone/my-favourite-model", "a" * 40, lambda p: mlx_target(p, MOE)
         )
-        fake.publish(MOE.draft.repo, MOE.draft.revision, lambda p: draft_dir(p, MOE))
+        fake.publish(MOE.draft.repo, DRAFT_COMMIT, lambda p: draft_dir(p, MOE))
         # The name says nothing about the model; the configuration does.
         chosen = selection(self.root, "someone/my-favourite-model")
         self.prepare(chosen)
@@ -293,7 +295,7 @@ class UpstreamTest(unittest.TestCase):
             fake.requests,
             [
                 ("someone/my-favourite-model", None),
-                (MOE.draft.repo, MOE.draft.revision),
+                (MOE.draft.repo, None),
             ],
         )
         record = assembly.verify(chosen.link)
@@ -302,7 +304,7 @@ class UpstreamTest(unittest.TestCase):
             record["sources"],
             {
                 "target": {"repo": chosen.model, "revision": "a" * 40},
-                "draft": {"repo": MOE.draft.repo, "revision": MOE.draft.revision},
+                "draft": {"repo": MOE.draft.repo, "revision": DRAFT_COMMIT},
             },
         )
         self.assertEqual(record["vision_format"], "none")
@@ -429,13 +431,13 @@ class UpstreamTest(unittest.TestCase):
             self.assertEqual(stream.read(), b"{}")
         self.assertEqual(fake.range_reads, [f"{MODEL}/tokenizer.json"])
 
-    def test_unchanged_commit_starts_with_one_request_and_no_download(self):
+    def test_unchanged_commits_start_with_a_request_each_and_no_download(self):
         fake = fake_hub(self, self.cache)
         chosen = selection(self.root)
         self.prepare(chosen)
         fake.requests.clear(), fake.downloads.clear()
         output, _ = self.prepare(chosen)
-        self.assertEqual(fake.requests, [(MODEL, None)])
+        self.assertEqual(fake.requests, [(MODEL, None), (DENSE.draft.repo, None)])
         self.assertEqual(fake.downloads, [])
         self.assertIn("is already installed", output)
 
@@ -460,9 +462,9 @@ class UpstreamTest(unittest.TestCase):
         self.assertEqual(
             assembly.verify(chosen.link)["sources"]["target"]["revision"], "b" * 40
         )
-        self.assertEqual(fake.requests, [(MODEL, None)])
+        self.assertEqual(fake.requests, [(MODEL, None), (DENSE.draft.repo, None)])
         self.assertNotIn(f"{DENSE.draft.repo}/model.safetensors", fake.downloads)
-        self.assertEqual(pins(self.cache), sorted(["b" * 40, DENSE.draft.revision]))
+        self.assertEqual(pins(self.cache), sorted(["b" * 40, DRAFT_COMMIT]))
 
     def test_publishing_removes_what_no_installation_uses(self):
         fake = fake_hub(self, self.cache)
@@ -513,6 +515,7 @@ class UpstreamTest(unittest.TestCase):
         ):
             with self.subTest(failure=failure):
                 fake.failure = failure
+                fake.requests.clear()
                 output, _ = self.prepare(chosen)
                 reason = hub.reason(failure)
                 self.assertNotIn("\n", reason)
@@ -522,6 +525,9 @@ class UpstreamTest(unittest.TestCase):
                     output,
                 )
                 self.assertIn("is already installed", output)
+                # A Hub that did not answer for the target is not asked for the
+                # draft.
+                self.assertEqual(fake.requests, [(MODEL, None)])
 
     def test_unreachable_hub_without_an_installation_is_the_error(self):
         fake = fake_hub(self, self.cache)
@@ -575,23 +581,21 @@ class UpstreamTest(unittest.TestCase):
             warnings,
         )
         self.assertEqual(chosen.link.resolve(), installed)
-        self.assertEqual(pins(self.cache), sorted(["a" * 40, DENSE.draft.revision]))
+        self.assertEqual(pins(self.cache), sorted(["a" * 40, DRAFT_COMMIT]))
         # Nothing installed: the rejection is the error.
         with self.assertRaisesRegex(models.ModelError, "timed out"):
             self.prepare(selection(self.root, revision="c" * 40))
 
-    def test_a_release_pinning_another_draft_reassembles_the_installed_target(self):
+    def test_a_moved_draft_reassembles_the_installed_target(self):
         fake = fake_hub(self, self.cache)
         chosen = selection(self.root)
         self.prepare(chosen)
-        moved = dataclasses.replace(
-            DENSE, draft=dataclasses.replace(DENSE.draft, revision="e" * 40)
-        )
         fake.publish(DENSE.draft.repo, "e" * 40, lambda p: draft_dir(p, DENSE))
         fake.requests.clear(), fake.downloads.clear()
-        with mock.patch.object(families, "FAMILIES", (moved, MOE)):
-            output, _ = self.prepare(chosen)
-        self.assertIn(f"pins the {DENSE.name} draft at {'e' * 12}", output)
+        output, _ = self.prepare(chosen)
+        self.assertIn(
+            f"{DENSE.draft.repo} moved from {DRAFT_COMMIT[:12]} to {'e' * 12}", output
+        )
         self.assertEqual(
             assembly.verify(chosen.link)["sources"],
             {
@@ -600,36 +604,57 @@ class UpstreamTest(unittest.TestCase):
             },
         )
         # Only the new draft is fetched; the target is not downloaded again.
-        self.assertEqual(fake.requests, [(MODEL, None), (DENSE.draft.repo, "e" * 40)])
+        self.assertEqual(fake.requests, [(MODEL, None), (DENSE.draft.repo, None)])
         self.assertTrue(
             all(name.startswith(DENSE.draft.repo + "/") for name in fake.downloads)
         )
         self.assertEqual(pins(self.cache), sorted(["a" * 40, "e" * 40]))
 
-    def test_a_draft_that_cannot_be_fetched_keeps_the_installed_one(self):
+    def test_an_installation_of_another_draft_repository_moves_to_the_familys(self):
+        fake = fake_hub(self, self.cache)
+        chosen = selection(self.root)
+        splash = dataclasses.replace(
+            DENSE,
+            draft=dataclasses.replace(
+                DENSE.draft, repo="incoai-internal/Splash-DFlash2"
+            ),
+        )
+        fake.publish(splash.draft.repo, "c" * 40, lambda p: draft_dir(p, DENSE))
+        with mock.patch.object(families, "FAMILIES", (splash, MOE)):
+            self.prepare(chosen)
+        fake.requests.clear()
+        output, _ = self.prepare(chosen)
+        self.assertIn(
+            f"its draft is now {DENSE.draft.repo}@{DRAFT_COMMIT[:12]}", output
+        )
+        self.assertEqual(
+            assembly.verify(chosen.link)["sources"]["draft"],
+            {"repo": DENSE.draft.repo, "revision": DRAFT_COMMIT},
+        )
+        self.assertEqual(fake.requests, [(MODEL, None), (DENSE.draft.repo, None)])
+
+    def test_a_draft_the_hub_cannot_resolve_keeps_the_installed_one(self):
         fake = fake_hub(self, self.cache)
         chosen = selection(self.root)
         self.prepare(chosen)
-        unpublished = dataclasses.replace(
-            DENSE, draft=dataclasses.replace(DENSE.draft, revision="f" * 40)
-        )
+        # The draft's main names a commit the Hub cannot serve.
+        fake.branches[DENSE.draft.repo, "main"] = "f" * 40
         fake.downloads.clear()
-        with mock.patch.object(families, "FAMILIES", (unpublished, MOE)):
-            _, warnings = self.prepare(chosen)
+        output, _ = self.prepare(chosen)
+        self.assertIn("Could not reach the Hub (404 Client Error", output)
         self.assertIn(
-            f"Warning: cannot fetch the {DENSE.name} draft {'f' * 12}; keeping the "
-            f"installed one: cannot resolve {DENSE.draft.repo}: 404 Client Error",
-            warnings,
+            f"using the installed draft {DENSE.draft.repo}@{DRAFT_COMMIT[:12]}.", output
         )
+        self.assertIn("is already installed", output)
         self.assertEqual(
             assembly.verify(chosen.link)["sources"]["draft"]["revision"],
-            DENSE.draft.revision,
+            DRAFT_COMMIT,
         )
         self.assertEqual(fake.downloads, [])
 
-    def move_target_and_pin_a_new_draft(self, build_draft, failing_revision=None):
-        """Install MODEL, then start with MODEL moved to b*40 while this
-        release pins DENSE's draft at e*40, built by build_draft; fetches of
+    def move_target_and_draft(self, build_draft, failing_revision=None):
+        """Install MODEL, then start with MODEL moved to b*40 and DENSE's draft
+        repository moved to e*40, built by build_draft; fetches of
         failing_revision fail. The warnings of that start."""
         fake = fake_hub(self, self.cache)
         chosen = selection(self.root)
@@ -643,33 +668,27 @@ class UpstreamTest(unittest.TestCase):
                 raise OSError(errno.ECONNRESET, "connection reset by peer")
             return fetch(repo_id, name, revision)
 
-        repinned = dataclasses.replace(
-            DENSE, draft=dataclasses.replace(DENSE.draft, revision="e" * 40)
-        )
-        with (
-            mock.patch.object(families, "FAMILIES", (repinned, MOE)),
-            mock.patch.object(fake, "fetch", side_effect=fetch_or_fail),
-        ):
+        with mock.patch.object(fake, "fetch", side_effect=fetch_or_fail):
             _, warnings = self.prepare(chosen)
         # The new target is installed with the installed draft.
         self.assertEqual(
             assembly.verify(chosen.link)["sources"],
             {
                 "target": {"repo": MODEL, "revision": "b" * 40},
-                "draft": {"repo": DENSE.draft.repo, "revision": DENSE.draft.revision},
+                "draft": {"repo": DENSE.draft.repo, "revision": DRAFT_COMMIT},
             },
         )
-        self.assertEqual(pins(self.cache), sorted(["b" * 40, DENSE.draft.revision]))
+        self.assertEqual(pins(self.cache), sorted(["b" * 40, DRAFT_COMMIT]))
         return warnings
 
     def test_a_new_draft_whose_download_fails_keeps_the_installed_draft(self):
-        warnings = self.move_target_and_pin_a_new_draft(
+        warnings = self.move_target_and_draft(
             lambda p: draft_dir(p, DENSE), failing_revision="e" * 40
         )
         self.assertIn(
-            f"Warning: cannot fetch the {DENSE.name} draft {'e' * 12}; keeping the "
-            f"installed one: cannot fetch the {DENSE.name} draft: "
-            f"[Errno {errno.ECONNRESET}] connection reset by peer",
+            f"Warning: cannot fetch the {DENSE.name} draft {DENSE.draft.repo}@"
+            f"{'e' * 12}; keeping the installed one: cannot fetch the {DENSE.name} "
+            f"draft: [Errno {errno.ECONNRESET}] connection reset by peer",
             warnings,
         )
 
@@ -678,11 +697,11 @@ class UpstreamTest(unittest.TestCase):
             draft_dir(root, DENSE)
             (root / "model.safetensors").unlink()
 
-        warnings = self.move_target_and_pin_a_new_draft(incomplete)
+        warnings = self.move_target_and_draft(incomplete)
         self.assertIn(
-            f"Warning: cannot fetch the {DENSE.name} draft {'e' * 12}; keeping the "
-            f"installed one: {DENSE.draft.repo} does not contain a DFlash2 "
-            f"checkpoint for {DENSE.name}",
+            f"Warning: cannot fetch the {DENSE.name} draft {DENSE.draft.repo}@"
+            f"{'e' * 12}; keeping the installed one: {DENSE.draft.repo} does not "
+            f"contain a DFlash2 checkpoint for {DENSE.name}",
             warnings,
         )
 
@@ -699,7 +718,11 @@ class UpstreamTest(unittest.TestCase):
         moved.mkdir()
         fake.requests.clear(), fake.downloads.clear()
         for name, start, requests in (
-            ("the Hub answers", lambda: self.prepare(chosen), [(MODEL, None)]),
+            (
+                "the Hub answers",
+                lambda: self.prepare(chosen),
+                [(MODEL, None), (DENSE.draft.repo, None)],
+            ),
             ("a commit revision", lambda: self.prepare(pinned), []),
             ("offline", lambda: self.prepare(chosen), []),
         ):
@@ -747,19 +770,13 @@ class UpstreamTest(unittest.TestCase):
         moved = self.root / "moved"
         moved.mkdir()
         fake.publish(DENSE.draft.repo, "e" * 40, lambda p: draft_dir(p, DENSE))
-        repinned = dataclasses.replace(
-            DENSE, draft=dataclasses.replace(DENSE.draft, revision="e" * 40)
-        )
         fake.downloads.clear()
-        with (
-            mock.patch("huggingface_hub.constants.HF_HUB_CACHE", str(moved)),
-            mock.patch.object(families, "FAMILIES", (repinned, MOE)),
-        ):
+        with mock.patch("huggingface_hub.constants.HF_HUB_CACHE", str(moved)):
             _, warnings = self.prepare(chosen)
         self.assertIn(
             f"Warning: keeping the installed {MODEL}@{'a' * 12}; cannot update it "
-            f"(this release pins the {DENSE.name} draft at {'e' * 12}): the Hub "
-            f"cache has no snapshot {'a' * 40} of {MODEL}",
+            f"({DENSE.draft.repo} moved from {DRAFT_COMMIT[:12]} to {'e' * 12}): "
+            f"the Hub cache has no snapshot {'a' * 40} of {MODEL}",
             warnings,
         )
         self.assertEqual(chosen.link.resolve(), installed)
@@ -792,7 +809,7 @@ class UpstreamTest(unittest.TestCase):
                     "*/*"
                 )
             )
-            self.assertEqual([ref.name for ref in draft_refs], [DENSE.draft.revision])
+            self.assertEqual([ref.name for ref in draft_refs], [DRAFT_COMMIT])
         self.assertEqual(refs[0].parent.name, draft_refs[0].parent.name)
         self.assertEqual(
             assembly.verify(chosen.link)["sources"]["target"]["revision"], "b" * 40
@@ -813,7 +830,7 @@ class UpstreamTest(unittest.TestCase):
     def test_pins_change_under_the_lock_and_are_repaired_on_start(self):
         fake_hub(self, self.cache)
         chosen = selection(self.root)
-        expected = sorted(["a" * 40, DENSE.draft.revision])
+        expected = sorted(["a" * 40, DRAFT_COMMIT])
         pin = hub.pin
 
         def locked(*arguments):
@@ -1003,9 +1020,13 @@ class UpstreamTest(unittest.TestCase):
                 assembly.verify(chosen.link)["sources"]["target"]["revision"],
                 "a" * 40,
             )
-            # and a new selection from the commit it names.
-            self.prepare(selection(self.root, revision="a" * 40))
-            assembly.verify(selection(self.root, revision="a" * 40).link)
+            # A new selection needs the Hub once for its draft's default branch,
+            # which no installation of it records.
+            with self.assertRaisesRegex(
+                models.ModelError,
+                f"cannot resolve {DENSE.draft.repo}: HF_HUB_OFFLINE is set",
+            ):
+                self.prepare(selection(self.root, revision="a" * 40))
             with self.assertRaisesRegex(
                 models.ModelError,
                 f"cannot resolve {MODEL}: HF_HUB_OFFLINE is set; neither this "

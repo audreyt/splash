@@ -20,6 +20,8 @@ from install import families, hub, models
 DENSE = families.named("Qwen3.8-27B")
 MOE = families.named("Qwen3.6-35B-A3B")
 MODEL = "mlx-community/Qwen3.8-27B-4bit"
+# The commit the main branch of every family's draft repository names.
+DRAFT_COMMIT = "d" * 40
 # The image preprocessing Splash implements (server/images.py).
 PROCESSOR = {
     "patch_size": 16,
@@ -174,14 +176,12 @@ class FakeHub:
 
 
 def fake_hub(test, cache, *, target=DENSE, commit="a" * 40):
-    """A FakeHub publishing MODEL at commit on main and the drafts'
-    repository at every family's pinned commit."""
+    """A FakeHub publishing MODEL at commit on main and every family's
+    draft repository at DRAFT_COMMIT on main."""
     fake = FakeHub(test, cache)
     fake.publish(MODEL, commit, lambda p: mlx_target(p, target))
     for family in families.FAMILIES:
-        fake.publish(
-            family.draft.repo, family.draft.revision, lambda p: draft_dir(p, family)
-        )
+        fake.publish(family.draft.repo, DRAFT_COMMIT, lambda p: draft_dir(p, family))
     return fake
 
 

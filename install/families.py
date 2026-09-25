@@ -18,10 +18,10 @@ else:
 
 @dataclass(frozen=True)
 class Draft:
-    # The DFlash2 checkpoint as its repository releases it, config.json and
-    # BF16 safetensors, at the commit Splash pins; loading prepares it.
+    # The repository of the DFlash2 checkpoint trained for the family, as its
+    # release publishes it: config.json and BF16 safetensors. Installations
+    # follow its default branch as they follow the target's.
     repo: str
-    revision: str
     layers: int
 
 
@@ -48,9 +48,7 @@ FAMILIES = (
             ("num_key_value_heads", 4),
             ("head_dim", 256),
         ),
-        Draft(
-            "incoai/Qwen3.8-27B-DFlash2", "015e795645c74b1a0eeef3b570031fb62e769bc5", 5
-        ),
+        Draft("incoai/Qwen3.8-27B-DFlash2", 5),
     ),
     ModelFamily(
         "Qwen3.6-35B-A3B",
@@ -66,11 +64,7 @@ FAMILIES = (
             ("num_experts", 256),
             ("num_experts_per_tok", 8),
         ),
-        Draft(
-            "incoai-internal/Qwen3.6-35B-A3B-DFlash2",
-            "d0d865a794d31db03c94ad8ec86e68fd14f9875f",
-            6,
-        ),
+        Draft("incoai-internal/Qwen3.6-35B-A3B-DFlash2", 6),
     ),
 )
 
