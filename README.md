@@ -140,13 +140,15 @@ that a long uncached prompt will reach its first token quickly.
 - `--draft-model`: another DFlash2 draft, a repository or local directory.
   Default: the draft trained for the model.
 - `--language-only`: skip vision; image and PDF input is then rejected.
-- `--host`: HTTP bind address. Default: `127.0.0.1`.
+- `--host`: HTTP bind address. Default: `127.0.0.1`. Clients connect by IP
+  address or `localhost`; other names need `--allowed-host`.
 - `--port`: HTTP port. Defaults to `SPLASH_PORT` or `8000`.
 - `--max-memory`: ceiling on Metal allocations, e.g. `28G`. Default: auto.
 - `--max-context`: context limit, up to `256K`, e.g. `100K`. Default: auto.
 - `--kv-format`: target KV cache storage, `int8` (default) or `bf16`.
 - `--max-image-pixels`: maximum resized pixels per image. Default: 4,194,304.
-- `--allowed-host`: extra HTTP `Host` name to accept, not a bind address. Repeatable.
+- `--allowed-host`: extra HTTP `Host` name to accept, such as `mymac.local`;
+  not a bind address. Repeatable.
 - `--api-key`: require this key on API requests, as a bearer token or
   `x-api-key`. Defaults to `SPLASH_API_KEY`.
 - `--no-webui`: turn off the chat page.
