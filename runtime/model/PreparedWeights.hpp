@@ -152,8 +152,11 @@ void requireWeightDiskSpace(uint64_t available, uint64_t required);
 class PreparedWeights final {
 public:
   PreparedWeights();
-  // Check the entire missing model before writing its first artifact. Completed
-  // layers remain reusable after an interruption; they are not partial files.
+  // Check the missing model before writing its first artifact: the space its
+  // files add beyond the entries they supersede, which publishing them
+  // evicts, and its largest file, written while the entries it replaces
+  // remain. Completed layers remain reusable after an interruption; they are
+  // not partial files.
   void requireSpace(std::span<const PreparedWeight> weights,
                     const PreparationCheck &check = {}) const;
   // The complete file of weight: reused, or written now under the converter

@@ -207,14 +207,19 @@ std::string provenance(const PreparedWeight &weight) {
   return text.str();
 }
 
-// Whether the entry at `directory` is an earlier preparation of what weight
-// holds: the same component from the same source data under another key (a
-// new preparation identity or plan), or an entry of an earlier version
-// prepared from the same source path.
-bool supersedes(const PreparedWeight &weight, const std::filesystem::path &directory) {
+// The first lines of the source file of the entry at `directory`.
+std::vector<std::string> sourceLines(const std::filesystem::path &directory) {
   std::ifstream stream(directory / "source");
   std::vector<std::string> lines;
   for (std::string line; lines.size() < 5 && std::getline(stream, line);) lines.push_back(line);
+  return lines;
+}
+
+// Whether an entry whose source file starts with `lines` is an earlier
+// preparation of what weight holds: the same component from the same source
+// data under another key (a new preparation identity or plan), or an entry of
+// an earlier version prepared from the same source path.
+bool supersedes(const PreparedWeight &weight, std::span<const std::string> lines) {
   if (lines.size() == 4 && lines[0] == kProvenance)
     return lines[1] == "component " + weight.component && lines[2] == "inputs " + weight.inputs;
   return lines.size() == 2 && lines[0] == weight.source;
@@ -314,8 +319,42 @@ void evictSuperseded(const std::filesystem::path &root, const PreparedWeight &we
   std::error_code error;
   for (const auto &entry : std::filesystem::directory_iterator(root, error)) {
     const auto name = entry.path().filename().string();
-    if (name != weight.key && isKey(name) && supersedes(weight, entry.path())) removeEntry(root, entry.path());
+    if (name != weight.key && isKey(name) && supersedes(weight, sourceLines(entry.path())))
+      removeEntry(root, entry.path());
   }
+}
+
+// The free space preparing the missing weights needs. Publishing a file
+// evicts the entries it supersedes (evictSuperseded), each credited here to
+// one file, so the model needs what its files add beyond those entries, plus
+// the largest file written while the entries it replaces remain. Other
+// generations stay and are not credited.
+uint64_t requiredBytes(const std::filesystem::path &root, std::span<const PreparedWeight *const> missing,
+                       const PreparationCheck &check) {
+  std::vector<uint64_t> evicted(missing.size());
+  for (const auto &entry : std::filesystem::directory_iterator(root)) {
+    run(check);
+    const auto name = entry.path().filename().string();
+    struct stat state{};
+    if (!isKey(name) || lstat((entry.path() / "weights").c_str(), &state) || !S_ISREG(state.st_mode)) continue;
+    const auto lines = sourceLines(entry.path());
+    for (size_t i = 0; i < missing.size(); ++i)
+      if (name != missing[i]->key && supersedes(*missing[i], lines)) {
+        evicted[i] += uint64_t(state.st_size);
+        break;
+      }
+  }
+  uint64_t added = 0, largest = 0;
+  for (size_t i = 0; i < missing.size(); ++i) {
+    const uint64_t replacing = std::min(missing[i]->bytes, evicted[i]);
+    if (missing[i]->bytes - replacing > std::numeric_limits<uint64_t>::max() - added)
+      throw std::overflow_error("prepared model size overflow");
+    added += missing[i]->bytes - replacing;
+    largest = std::max(largest, replacing);
+  }
+  if (largest > std::numeric_limits<uint64_t>::max() - added)
+    throw std::overflow_error("prepared model size overflow");
+  return added + largest;
 }
 
 } // namespace
@@ -448,28 +487,25 @@ PreparedWeights::PreparedWeights() : root_(cacheRoot()) {}
 
 void PreparedWeights::requireSpace(std::span<const PreparedWeight> weights,
                                    const PreparationCheck &check) const {
-  const auto missingBytes = [&] {
-    uint64_t missing = 0;
+  const auto missing = [&] {
+    std::vector<const PreparedWeight *> result;
     for (const auto &weight : weights) {
       if (!isKey(weight.key) || !weight.bytes)
         throw std::invalid_argument("invalid prepared weight identity or size");
       run(check);
-      if (complete(root_ / weight.key, weight.bytes, check)) continue;
-      if (weight.bytes > std::numeric_limits<uint64_t>::max() - missing)
-        throw std::overflow_error("prepared model size overflow");
-      missing += weight.bytes;
+      if (!complete(root_ / weight.key, weight.bytes, check)) result.push_back(&weight);
     }
-    return missing;
+    return result;
   };
-  if (!missingBytes()) return;
+  if (missing().empty()) return;
   std::filesystem::create_directories(root_);
   PreparationLock lock(root_, check);
   // Reclaim abandoned writes before budgeting a retry. Live converters hold
   // the lock, so every staging entry is abandoned, whichever model or version
-  // wrote it; complete generations are retained and excluded from the budget.
+  // wrote it.
   for (const auto &entry : std::filesystem::directory_iterator(root_))
     if (entry.path().extension() == ".partial") std::filesystem::remove_all(entry.path());
-  requireWeightDiskSpace(std::filesystem::space(root_).available, missingBytes());
+  requireWeightDiskSpace(std::filesystem::space(root_).available, requiredBytes(root_, missing(), check));
 }
 
 std::filesystem::path PreparedWeights::prepare(const PreparedWeight &weight, const WeightWriter &write,

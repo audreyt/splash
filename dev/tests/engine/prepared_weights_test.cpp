@@ -169,6 +169,32 @@ void diskChecksKeepTheReserveAndCoverTheModel(Cache &cache) {
   require(!std::filesystem::exists(cache.root / key(20)), "disk preflight wrote a partial model");
 }
 
+// Publishing a file evicts the entries it supersedes, so preparing a model
+// again under a new identity needs room for its largest file, not for all of
+// it; a model that supersedes nothing still needs room for every file.
+void supersededEntriesAreCredited(Cache &cache) {
+  const uint64_t available = std::filesystem::space(cache.root).available;
+  const uint64_t size = available / 4;
+  std::vector<PreparedWeight> model, earlier;
+  for (uint8_t i = 0; i < 8; ++i) {
+    const std::string component = "model/layer-" + std::to_string(i) + ".bin";
+    model.push_back({key(90 + i), size, component, key(110 + i), "/model"});
+    earlier.push_back({key(100 + i), cache.bytes.size(), component, key(110 + i), "/model"});
+  }
+  rejects([&] { cache.store.requireSpace(model); }, "not enough disk space", "a new model's budget was credited");
+  // The earlier generation of each file, as large as its replacement, sparse.
+  for (const auto &weight : earlier) {
+    const auto path = cache.prepare(weight);
+    std::filesystem::permissions(path, std::filesystem::perms::owner_write, std::filesystem::perm_options::add);
+    std::filesystem::resize_file(path, size);
+  }
+  cache.store.requireSpace(model);
+  // A file is written while the entry it replaces remains.
+  const std::array<PreparedWeight, 1> large{{{key(98), available - kGiB, model[0].component, model[0].inputs, "/model"}}};
+  rejects([&] { cache.store.requireSpace(large); }, "not enough disk space", "a replaced entry was counted free");
+  for (const auto &weight : earlier) std::filesystem::remove_all(cache.root / weight.key);
+}
+
 // Same-size corruption must not pass a metadata-only check.
 void corruptionIsRepaired(Cache &cache) {
   const auto path = cache.prepare(1);
@@ -288,6 +314,7 @@ int main() {
     warmHitsAreCancellable(cache);
     warmLoadDoesNotWaitForTheConverterLock(cache);
     diskChecksKeepTheReserveAndCoverTheModel(cache);
+    supersededEntriesAreCredited(cache);
     corruptionIsRepaired(cache);
     failedWritesPublishNothing(cache);
     crashedWriteIsReclaimed(cache);
