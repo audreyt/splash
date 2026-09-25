@@ -23,6 +23,9 @@ class ArchitectureTests(unittest.TestCase):
                     "from server.frontend import Frontend",
                     "from server import frontend",
                     "import server.frontend",
+                    "import importlib\nimportlib.import_module('server.frontend')",
+                    "from importlib import import_module\nimport_module('.frontend', 'server')",
+                    "__import__('server.frontend')",
                 ):
                     with self.subTest(statement=statement):
                         (server / "backend.py").write_text(statement)
@@ -168,6 +171,55 @@ class ArchitectureTests(unittest.TestCase):
                         self.assertEqual(
                             check_architecture.check(),
                             ["runtime/main.mm: startup names a concrete model type"],
+                        )
+
+    def test_metal_depends_on_no_upper_production_layer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "runtime/model").mkdir(parents=True)
+            (root / "runtime/model/Model.hpp").write_text("")
+            kernel = root / "runtime/metal/kernels/shared/rope.metal"
+            kernel.parent.mkdir(parents=True)
+            with mock.patch.object(check_architecture, "ROOT", root):
+                for include, header in (
+                    ('#include "engine/Engine.hpp"', "engine/Engine.hpp"),
+                    ('#include "model/Model.hpp"', "model/Model.hpp"),
+                    ('#include "ops/Linear.hpp"', "ops/Linear.hpp"),
+                    ('#include "../../../model/Model.hpp"', "model/Model.hpp"),
+                ):
+                    with self.subTest(include=include):
+                        kernel.write_text(include + "\n")
+                        self.assertEqual(
+                            check_architecture.check(),
+                            [
+                                "runtime/metal/kernels/shared/rope.metal: Metal "
+                                f"depends on production layer {header}"
+                            ],
+                        )
+
+    def test_includes_are_read_where_the_compiler_finds_them(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "runtime/model").mkdir(parents=True)
+            (root / "runtime/model/QwenTarget.hpp").write_text("")
+            policy = root / "runtime/engine/Scheduler.cpp"
+            policy.parent.mkdir()
+            with mock.patch.object(check_architecture, "ROOT", root):
+                for include in (
+                    '# include "model/QwenTarget.hpp"',
+                    '#include"model/QwenTarget.hpp"',
+                    "#  import <model/QwenTarget.hpp>",
+                    '#include "../model/QwenTarget.hpp"',
+                    '#include "model/../model/QwenTarget.hpp"',
+                ):
+                    with self.subTest(include=include):
+                        policy.write_text(include + "\n")
+                        self.assertEqual(
+                            check_architecture.check(),
+                            [
+                                "runtime/engine/Scheduler.cpp: engine policy "
+                                "depends on concrete model model/QwenTarget.hpp"
+                            ],
                         )
 
     def test_production_cannot_include_offline_tuning(self):
