@@ -82,8 +82,8 @@ jobs:
     timeout-minutes: 360
     # The Metal suite once, then each model of DEVELOPMENT.md's Release check
     # (MLX and GGUF, dense and MoE, each at one commit, and a legacy package)
-    # against the runner's retained baseline build; every model runs even
-    # when an earlier step failed.
+    # against the runner's retained baseline build, RUNNER_BASELINE, which
+    # release-check requires; every model runs even when an earlier step failed.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run the shader-validated Metal suite

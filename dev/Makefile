@@ -132,11 +132,15 @@ else
 	@echo "native backend characterization: PASS ($(MODEL_RESULTS)/backend-benchmark.json)"
 endif
 
-# One model on this machine (DEVELOPMENT.md, Release check); make check and
-# test-sanitizers run once per source identity, check-native-metal and the
-# agent clients once per machine. verify-models follows test-real, whose load
-# prepares the weights it records.
+# One model on this machine against BASELINE, the previous release's build
+# (DEVELOPMENT.md, Release check); make check and test-sanitizers run once per
+# source identity, check-native-metal and the agent clients once per machine.
+# verify-models follows test-real, whose load prepares the weights it records.
 release-check: preflight
+	@test -n "$(BASELINE)" || { \
+		echo "error: release-check compares with BASELINE, the previous release's build" >&2; \
+		exit 1; \
+	}
 	@test -z "$$(git status --porcelain)" || { \
 		echo "error: release checkout is not clean" >&2; \
 		git status --short >&2; \

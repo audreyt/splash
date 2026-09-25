@@ -818,7 +818,8 @@ and experiment notes out of the source tree and commits.
 A release is checked once per source identity, and then on each Apple GPU
 family (an Apple9 M3 and an Apple10 M5) against the previous release's build,
 retained as `BASELINE`: a checkout whose `build/` holds `splash`,
-`splash.metallib` and `engine-tests/backend-benchmark`. From a clean checkout:
+`splash.metallib` and `engine-tests/backend-benchmark`. `release-check` fails
+without it. From a clean checkout:
 
 ```sh
 make check test-sanitizers                      # once, model-free
