@@ -450,15 +450,20 @@ def _install(selection, repo, installed, draft=None):
         records = {path: assembly.file_record(path) for path in set(files.values())}
         record["files"] = {name: records[path] for name, path in sorted(files.items())}
         # A new installation requires its pins before it is published; its
-        # older pins are retired once it is.
+        # older pins are retired once it is, in the repositories the
+        # assembly it replaces linked too.
         pins = [
             hub.pin(snapshot, repo_id, selection.link)
             for snapshot, repo_id in assembly.pins(record)
         ]
+        replaced = [
+            hub.pinned(snapshot, selection.link)
+            for snapshot, _ in assembly.recorded_pins(selection.link)
+        ]
         models.link_selection(
             selection.link, assembly.build(models_root, record, files)
         )
-        hub.retire_other_pins(pins)
+        hub.retire_other_pins(pins, replaced)
         assembly.collect_garbage(models_root)
 
 

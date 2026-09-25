@@ -151,7 +151,9 @@ Installation resolves each source's revision to a commit once, downloads by
 that commit and records it in `model.json`, so a repository update cannot mix
 files from different revisions. It pins those snapshots in the Hub cache
 (`refs/splash/<installation>/<commit>`), so pruning the cache cannot remove files
-an installed model links.
+an installed model links. Publishing a new assembly retires the installation's
+other pins, in the repositories it links and in those its predecessor linked,
+so pruning can free what no installation links any more.
 
 Every start resolves the target's revision (the default branch, or
 `--revision`) with one Hub request of at most 5 seconds (`hub.HUB_TIMEOUT`),

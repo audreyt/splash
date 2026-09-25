@@ -241,6 +241,17 @@ def pins(record):
     return sorted(snapshots.items())
 
 
+def recorded_pins(link: Path):
+    """pins of the assembly a selection link names, as its record states
+    them whether or not the assembly still verifies; none without a record
+    of the shape build writes."""
+    try:
+        record = models.read_json(link / "model.json")
+    except models.ModelError:
+        return []
+    return pins(record) if _well_formed(record) else []
+
+
 def _metadata_inputs(files):
     """The assembly paths of the GGUF files the derived metadata comes from,
     in order: the target, then the vision projector."""
