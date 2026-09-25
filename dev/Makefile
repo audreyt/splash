@@ -89,8 +89,10 @@ check-python-engine: install-development test-python test-models
 	$(PYTHON) -m ruff format --check --config dev/ruff.toml server \
 		install/*.py dev/tools dev/tests dev/benchmarks
 
-architecture-check:
-	$(BUILD_ID_PYTHON) dev/tools/check_architecture.py
+# It parses the server's sources, which need the environment's Python
+# (3.12-3.14); BUILD_ID_PYTHON, the build tools' python3, may be Xcode's 3.9.
+architecture-check: install-environment
+	$(PYTHON) dev/tools/check_architecture.py
 
 check: check-source check-native-engine check-python-engine
 

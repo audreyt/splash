@@ -31,21 +31,26 @@ esac
 """
 
 
+# What a calling make or shell exports that would configure the make tested.
+INHERITED = (
+    "MAKEFLAGS",
+    "MFLAGS",
+    "MAKELEVEL",
+    "MODEL",
+    "REVISION",
+    "DRAFT_MODEL",
+    "LANGUAGE_ONLY",
+    "PYTHON_CANDIDATES",
+)
+
+
 class MakefileTests(unittest.TestCase):
-    def make(self, *arguments):
-        # Only the arguments configure make: no inherited jobserver, model
-        # selection or interpreter choice.
-        environment = {
-            name: value
-            for name, value in os.environ.items()
-            if name not in ("MAKEFLAGS", "MFLAGS", "MAKELEVEL")
-            and name not in ("MODEL", "REVISION", "DRAFT_MODEL", "LANGUAGE_ONLY")
-            and name != "PYTHON_CANDIDATES"
-        }
+    def make(self, *arguments, **environment):
+        inherited = {k: v for k, v in os.environ.items() if k not in INHERITED}
         return subprocess.run(
             ("make", "--no-print-directory", *arguments),
             cwd=ROOT,
-            env=environment,
+            env={**inherited, **environment},
             capture_output=True,
             text=True,
             timeout=120,
@@ -92,6 +97,22 @@ class MakefileTests(unittest.TestCase):
             # A current environment installs nothing.
             self.assertEqual(self.make(*arguments).returncode, 0)
             self.assertEqual(len((directory / "pip.log").read_text().splitlines()), 4)
+
+    def test_python_candidates_may_come_from_the_environment(self):
+        # As the release job sets them.
+        result = self.make("-n", "_install-environment", PYTHON_CANDIDATES="python3")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("for candidate in python3; do", result.stdout)
+
+    def test_architecture_check_parses_with_the_environments_python(self):
+        with tempfile.TemporaryDirectory() as directory:
+            environment = Path(directory) / "venv"
+            result = self.make("-n", "architecture-check", f"VENV={environment}")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                f"{environment}/bin/python dev/tools/check_architecture.py\n",
+                result.stdout,
+            )
 
 
 if __name__ == "__main__":
