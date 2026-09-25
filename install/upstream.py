@@ -59,9 +59,9 @@ class Target:
 
 
 def _root_ggufs(files):
-    """The GGUF files at a repository's root; subfolders (split BF16, MTP
-    heads) never count."""
-    return sorted(n for n in files if "/" not in n and n.lower().endswith(".gguf"))
+    """The GGUF files at a repository's root, named *.gguf as the native
+    loader finds a target; subfolders (split BF16, MTP heads) never count."""
+    return sorted(n for n in files if "/" not in n and n.endswith(".gguf"))
 
 
 def select_gguf(files, variant):

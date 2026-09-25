@@ -125,6 +125,13 @@ class UpstreamTest(unittest.TestCase):
                 self.assertRaisesRegex(models.ModelError, "Qwen3.8-27B-Q8_0.gguf"),
             ):
                 upstream.select_gguf(files, variant)
+        # The native loader finds a target by its .gguf extension alone.
+        for variant in ("Q4_K_M", None):
+            with (
+                self.subTest(variant=variant),
+                self.assertRaisesRegex(models.ModelError, "repository root: none"),
+            ):
+                upstream.select_gguf({"Qwen3.8-27B-Q4_K_M.GGUF"}, variant)
 
     def test_architecture_is_checked_before_weight_downloads(self):
         fake = FakeHub(self, self.cache)

@@ -364,8 +364,9 @@ affine draft's) and reserves the vocabulary head only for decode.
 ### GGUF targets
 
 `--model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M` selects the repository's
-root-level GGUF for that variant: the file named with the model name its GGUFs
-share, then `-UD-Q4_K_M`, or else the only one whose name ends in `-UD-Q4_K_M`
+root-level `.gguf` file (a lower-case extension, as the native loader requires)
+for that variant: the file named with the model name its GGUFs share, then
+`-UD-Q4_K_M`, or else the only one whose name ends in `-UD-Q4_K_M`
 (`upstream.select_gguf`). Before any weight download, its header must list
 every tensor the loader reads with a type it accepts for that tensor
 (`gguf.loaded_tensors`, checked by `gguf.require_loadable`; a test holds its
