@@ -27,7 +27,8 @@ struct EngineConfig final {
   uint32_t maxImagePatches = ops::kMaximumImagePatches;
   double resourceWaitTimeoutMilliseconds = 30000.0;
   // Host growth admission, supplied by the runtime governor. Queried only on
-  // failed allocation, never on the successful decode path.
+  // failed allocation and, after a suspension the pause caused, while
+  // resident lanes drain; never on the ordinary decode path.
   std::function<bool()> growthPaused;
 };
 

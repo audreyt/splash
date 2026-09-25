@@ -243,10 +243,12 @@ bool Engine::tick(double now) {
 bool Engine::idle() const noexcept { return requests_.empty() && !pending_; }
 
 bool Engine::drainingForRecovery() const {
-  return drainEndMilliseconds_ > 0.0 && (allocationFailed_ || growthPaused()) &&
-         std::any_of(requests_.begin(), requests_.end(), [](const auto &entry) {
-           return entry.second.stateCell.has_value();
-         });
+  return drainEndMilliseconds_ > 0.0 &&
+         std::any_of(requests_.begin(), requests_.end(),
+                     [](const auto &entry) {
+                       return entry.second.stateCell.has_value();
+                     }) &&
+         (allocationFailed_ || growthPaused());
 }
 
 std::optional<double> Engine::nextWakeupMilliseconds() const {
