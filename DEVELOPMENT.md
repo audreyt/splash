@@ -221,6 +221,9 @@ pressure or too little headroom for the startup reserve still fails.
 
 `WeightFile` maps completed files, prepared or packed, read-only into one
 no-copy Metal buffer, so no model-sized anonymous allocation holds the weights.
+It maps a prepared file only if a digest proof covers the very file it opened
+and matches the digest its entry records (`requireVerifiedFile`), so a file
+replaced or changed after `prepare` checked it is refused.
 Runtime admission counts prepared weights, draft and vision exactly once
 (`preparedModelWeightBytes`, which `tune-kernels` and the runtime oracle use
 too). File

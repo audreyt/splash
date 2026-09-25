@@ -267,6 +267,32 @@ void changedSourcesAreRejected(Cache &cache) {
   rejects([&] { beforeReplacement.checkUnchanged(); }, "source weights changed", "replaced source was accepted");
 }
 
+// A prepared file is mapped only as the cache verified it (WeightFile): not
+// once replaced, even by the same bytes, until prepare verifies it again, and
+// not once modified.
+void onlyVerifiedFilesAreMapped(Cache &cache) {
+  const auto path = cache.prepare(11);
+  const auto map = [&] {
+    const int file = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    require(file >= 0, "open " + path.string());
+    try {
+      requireVerifiedFile(file, path);
+    } catch (...) {
+      close(file);
+      throw;
+    }
+    close(file);
+  };
+  map();
+  std::filesystem::copy_file(path, cache.root / "copy");
+  std::filesystem::rename(cache.root / "copy", path);
+  rejects(map, "changed after verification", "a replaced prepared file was mapped");
+  require(cache.buildsOf(11) == 0, "an identical replacement was prepared again");
+  map();
+  corrupt(path, 0);
+  rejects(map, "changed after verification", "a modified prepared file was mapped");
+}
+
 // Damaged memoization proofs must be recomputed, not trusted.
 void damagedProofsAreRecomputed(Cache &cache) {
   static_cast<void>(cache.prepare(9));
@@ -320,6 +346,7 @@ int main() {
     crashedWriteIsReclaimed(cache);
     concurrentMissesWriteOnce(cache);
     changedSourcesAreRejected(cache);
+    onlyVerifiedFilesAreMapped(cache);
     damagedProofsAreRecomputed(cache);
     publishingSupersedesEarlierPreparations(cache);
     std::cout << "prepared weights: content, reuse, corruption, interruption, pressure, concurrency and "

@@ -33,6 +33,8 @@ struct WeightFileRecord final {
 
 // A read-only mmap with one no-copy Metal base buffer.  Sections are checked,
 // aligned views that retain the mapping; no model loader owns raw mmap state.
+// A file with a content identity, its cache key, is a prepared file: it is
+// mapped only as the cache verified it (requireVerifiedFile).
 class WeightFile final {
 public:
   WeightFile(metal::MetalBackend &backend, std::filesystem::path path,

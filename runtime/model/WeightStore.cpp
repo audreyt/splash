@@ -2,6 +2,7 @@
 
 #include "metal/abi/Gguf.h"
 #include "model/GgufImageLayout.hpp"
+#include "model/PreparedWeights.hpp"
 
 #include <CommonCrypto/CommonDigest.h>
 
@@ -81,8 +82,9 @@ std::string systemError(std::string_view operation,
 
 class MappedRegion final {
 public:
+    // A prepared file is mapped only as the cache verified it.
     static std::shared_ptr<MappedRegion> openReadOnly(
-        const std::filesystem::path &path) {
+        const std::filesystem::path &path, bool prepared) {
         int descriptor = open(path.c_str(), O_RDONLY | O_CLOEXEC);
         if (descriptor < 0) {
             throw WeightStoreError(systemError("unable to open", path, errno));
@@ -98,6 +100,14 @@ public:
             close(descriptor);
             throw WeightStoreError("packed file is not a non-empty regular file: " +
                                    path.string());
+        }
+        if (prepared) {
+            try {
+                requireVerifiedFile(descriptor, path);
+            } catch (...) {
+                close(descriptor);
+                throw;
+            }
         }
         uint64_t bytes = static_cast<uint64_t>(status.st_size);
         if (bytes > std::numeric_limits<size_t>::max()) {
@@ -178,7 +188,7 @@ WeightFile::WeightFile(metal::MetalBackend &backend,
                        uint32_t expectedType, std::string contentIdentity)
     : impl_(std::make_unique<Impl>()) {
     impl_->backend = &backend;
-    impl_->mapping = MappedRegion::openReadOnly(path);
+    impl_->mapping = MappedRegion::openReadOnly(path, !contentIdentity.empty());
     impl_->bytes = impl_->mapping->bytes();
     checkWeightHeader(static_cast<const uint8_t *>(impl_->mapping->address()),
                       impl_->bytes, expectedMagic, expectedLayer, expectedType,

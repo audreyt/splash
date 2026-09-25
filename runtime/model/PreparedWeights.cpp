@@ -158,6 +158,26 @@ void rememberDigest(const std::filesystem::path &root, const struct stat &state,
   }
 }
 
+// The digest a valid proof remembers for bytes [from, end) of the file of
+// state; empty when none does.
+std::string provenDigest(const struct stat &state, uint64_t from, const std::filesystem::path &root) {
+  const auto key = verificationKey(state, from);
+  const int existing = open((root / "verified" / key).c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (existing < 0) {
+    if (errno != ENOENT) fail("open weight verification");
+    return {};
+  }
+  Descriptor proof(existing);
+  struct stat info{};
+  if (fstat(proof, &info) || !S_ISREG(info.st_mode) || info.st_size != 128) return {};
+  std::array<uint8_t, 128> bytes;
+  readWeightBytes(proof, 0, bytes);
+  const std::string record(bytes.begin(), bytes.end());
+  const auto value = record.substr(0, 64);
+  if (value.find_first_not_of("0123456789abcdef") != value.npos || verificationRecord(key, value) != record) return {};
+  return value;
+}
+
 // The content hash is computed on first use. A proof is reusable only for the
 // same inode, length, birth time, mtime and ctime. Replacing or writing even a
 // same-size file invalidates it. No upstream file or extended attribute is
@@ -168,21 +188,7 @@ std::string verifiedDigest(int fd, uint64_t from, const std::filesystem::path &p
   struct stat before{}, after{};
   if (fstat(fd, &before)) fail("stat verified weights");
   if (!S_ISREG(before.st_mode) || before.st_size < 0) throw std::runtime_error("weights must be a regular file");
-  const auto key = verificationKey(before, from);
-  const int existing = open((root / "verified" / key).c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-  std::string digest;
-  if (existing >= 0) {
-    Descriptor proof(existing);
-    struct stat info{};
-    if (!fstat(proof, &info) && S_ISREG(info.st_mode) && info.st_size == 128) {
-      std::array<uint8_t, 128> bytes;
-      readWeightBytes(proof, 0, bytes);
-      const std::string record(bytes.begin(), bytes.end());
-      const auto value = record.substr(0, 64);
-      if (value.find_first_not_of("0123456789abcdef") == value.npos && verificationRecord(key, value) == record)
-        digest = value;
-    }
-  } else if (errno != ENOENT) fail("open weight verification");
+  std::string digest = provenDigest(before, from, root);
   const bool missing = digest.empty();
   if (missing) {
     std::clog << "Hashing " << path.string() << " (" << (uint64_t(before.st_size) - from) / (1024 * 1024)
@@ -240,6 +246,23 @@ void removeEntry(const std::filesystem::path &root, const std::filesystem::path 
   if (hashed) unlink((root / "verified" / verificationKey(state, 0)).c_str());
 }
 
+// The digest the entry at `directory` records for its file; empty when it
+// records none.
+std::string recordedDigest(const std::filesystem::path &directory) {
+  const int manifest = open((directory / "sha256").c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (manifest < 0) {
+    if (errno == ENOENT) return {};
+    fail("open cached weight digest");
+  }
+  Descriptor hashFile(manifest);
+  struct stat state{};
+  if (fstat(hashFile, &state)) fail("stat cached weight digest");
+  if (!S_ISREG(state.st_mode) || state.st_size != 64) return {};
+  std::array<uint8_t, 64> digest{};
+  readWeightBytes(hashFile, 0, digest);
+  return std::string(digest.begin(), digest.end());
+}
+
 bool complete(const std::filesystem::path &directory, uint64_t bytes,
               const PreparationCheck &check) {
   const int input = open((directory / "weights").c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
@@ -252,18 +275,9 @@ bool complete(const std::filesystem::path &directory, uint64_t bytes,
   if (fstat(file, &state)) fail("stat cached weights");
   if (!S_ISREG(state.st_mode) || state.st_size < 0 || uint64_t(state.st_size) != bytes)
     return false;
-  const int manifest = open((directory / "sha256").c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-  if (manifest < 0) {
-    if (errno == ENOENT) return false;
-    fail("open cached weight digest");
-  }
-  Descriptor hashFile(manifest);
-  if (fstat(hashFile, &state)) fail("stat cached weight digest");
-  if (!S_ISREG(state.st_mode) || state.st_size != 64) return false;
-  std::array<uint8_t, 64> digest{};
-  readWeightBytes(hashFile, 0, digest);
-  return verifiedDigest(file, 0, directory / "weights", directory.parent_path(), check) ==
-         std::string(digest.begin(), digest.end());
+  const std::string recorded = recordedDigest(directory);
+  return !recorded.empty() &&
+         verifiedDigest(file, 0, directory / "weights", directory.parent_path(), check) == recorded;
 }
 
 // Writes the file of weight into staging and seals it: read-only, flushed to
@@ -481,6 +495,15 @@ void requireWeightDiskSpace(uint64_t available, uint64_t required) {
   if (required && (available < kDiskReserveBytes || required > available - kDiskReserveBytes))
     throw std::runtime_error("not enough disk space to prepare weights: need " +
         std::to_string(required) + " bytes plus a 2 GiB free-space reserve");
+}
+
+void requireVerifiedFile(int descriptor, const std::filesystem::path &path) {
+  struct stat state{};
+  if (fstat(descriptor, &state)) fail("stat prepared weights");
+  const auto directory = path.parent_path();
+  const std::string proven = provenDigest(state, 0, directory.parent_path());
+  if (proven.empty() || proven != recordedDigest(directory))
+    throw std::runtime_error("prepared weights changed after verification: " + path.string());
 }
 
 PreparedWeights::PreparedWeights() : root_(cacheRoot()) {}

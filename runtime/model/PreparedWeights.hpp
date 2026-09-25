@@ -148,6 +148,13 @@ using WeightWriter = std::function<void(int destination, const PreparationCheck 
 // 2 GiB free-space reserve; a model with nothing to write needs no reserve.
 void requireWeightDiskSpace(uint64_t available, uint64_t required);
 
+// Throws unless descriptor, open on the prepared file at path, is a file
+// whose digest the cache verified and remembers for this unmodified file,
+// equal to the one its entry records. WeightFile maps a prepared file only
+// then, so a file that replaced or changed it after prepare returned its
+// path is refused.
+void requireVerifiedFile(int descriptor, const std::filesystem::path &path);
+
 // The cache is SPLASH_WEIGHT_CACHE, or ~/Library/Caches/Splash/weights.
 class PreparedWeights final {
 public:

@@ -1,5 +1,6 @@
 #include "model/GgufImageLayout.hpp"
 #include "model/ModelFactory.hpp"
+#include "model/PreparedFiles.hpp"
 #include "model/WeightLayout.hpp"
 #include "ops/Embedding.hpp"
 
@@ -469,6 +470,33 @@ void testWeightFileValidationAndLifetime(MetalBackend &backend,
         "unaligned packed file size was accepted");
 }
 
+// A prepared file is mapped only as the cache verified it: a file put in its
+// place after prepare returned it is refused, whatever its bytes.
+void testPreparedFileMapsOnlyAsVerified(MetalBackend &backend, const std::filesystem::path &root) {
+    const std::filesystem::path cache = root / "verified-cache";
+    std::filesystem::create_directories(cache);
+    setenv("SPLASH_WEIGHT_CACHE", cache.c_str(), 1);
+    const auto header = splash::model::weightFileHeader("TEST0001", 3, 4);
+    const splash::model::PreparedWeight weight{std::string(64, 'c'), 2 * kWeightFileAlignment, "test/prepared.bin",
+                                               std::string(64, 'd'), "/test"};
+    const splash::model::WeightWriter write = [&](int destination, const splash::model::PreparationCheck &) {
+        splash::model::writeWeightBytes(destination, 0, header);
+    };
+    const splash::model::PreparedFiles files({}, {}, {});
+    static_cast<void>(files.open(backend, weight, write, "TEST0001", 3, 4));
+    const std::filesystem::path path = files.prepare(weight, write);
+    std::filesystem::rename(path, root / "replaced.bin");
+    const std::array<uint64_t, 1> sections{64};
+    writeWeightFile(path, "TEST0001", 3, 4, sections);
+    bool refused = false;
+    try {
+        WeightFile replaced(backend, path, weight.component, "TEST0001", 3, 4, weight.key);
+    } catch (const std::exception &error) {
+        refused = std::string_view(error.what()).find("changed after verification") != std::string_view::npos;
+    }
+    require(refused, "a file replacing a verified prepared file was mapped");
+}
+
 // One tensor of a GGUF image: its 64-byte descriptor, then its sections.
 std::filesystem::path writeGgufTensor(const std::filesystem::path &path, uint32_t type,
                                       uint32_t rows, uint32_t columns,
@@ -871,6 +899,7 @@ int main(int argc, const char *argv[]) {
         MetalBackend backend(argv[1]);
         TempDirectory temporary;
         testWeightFileValidationAndLifetime(backend, temporary.path());
+        testPreparedFileMapsOnlyAsVerified(backend, temporary.path());
         testGgufImageLayout(backend, temporary.path());
         testSyntheticPackage(backend, temporary.path() / "package");
         if (argc == 3) {
